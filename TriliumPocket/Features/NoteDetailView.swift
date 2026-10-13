@@ -159,11 +159,15 @@ private struct NoteDetailContent: View {
                     } else if note.type == "file" {
                         ContentUnavailableView("附件笔记", systemImage: "paperclip", description: Text("当前版本支持文本和图片阅读。此附件请在 Trilium 中查看。"))
                     } else if note.type == "text", (!editor.editing || !editor.sourceEditing), let api = try? model.client() {
-                        NoteWebView(content: editor.content, editing: editor.editing && !editor.saving, api: api, bridge: webBridge, command: command,
-                                    onChange: { editor.content = $0; editor.persistDraft() },
-                                    onNoteLink: { id in Task {
-                                        do { linkedNote = try await model.client().note(id) } catch { model.report(error) }
-                                    } })
+                        NoteHTMLContent(content: editor.content, editing: editor.editing && !editor.saving,
+                                        api: api, bridge: webBridge, command: command,
+                                        onChange: { editor.content = $0; editor.persistDraft() },
+                                        onSourceEdit: { editor.sourceEditing = true; editor.editing = true },
+                                        onNoteLink: { id in Task {
+                                            do { linkedNote = try await model.client().note(id) } catch { model.report(error) }
+                                        } })
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .layoutPriority(1)
                     } else if editor.editing {
                         if editor.sourceEditing {
                             Text("HTML 源码编辑：保留此笔记的复杂结构和格式。").font(.caption).foregroundStyle(.secondary).padding(.horizontal)
@@ -182,6 +186,7 @@ private struct NoteDetailContent: View {
                         }
                     }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .allowsHitTesting(!preparingSave)
                 .safeAreaInset(edge: .bottom) {
                     if editor.editing && note.type == "text" && !editor.sourceEditing {
@@ -204,6 +209,7 @@ private struct NoteDetailContent: View {
         }
         .navigationTitle(editor.note?.title ?? "笔记")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar, .tabBar)
         .toolbar {
             if let note = editor.note, editor.failure == nil {
                 ToolbarItemGroup(placement: .topBarTrailing) {

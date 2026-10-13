@@ -5,6 +5,8 @@ import WebKit
 final class WebEditorBridge: ObservableObject {
     weak var web: WKWebView?
     var ready = false
+    @Published var isLoading = true
+    @Published var displayError: String?
     func flush() async throws -> String? {
         guard ready, let web else { throw UserFacingError(message: "编辑器正在准备，请稍后保存。") }
         web.endEditing(true)
@@ -24,18 +26,23 @@ struct NoteWebView: UIViewRepresentable {
     struct EditorCommand: Equatable { let id = UUID(); let name: String; var value: String? = nil }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
-    func makeUIView(context: Context) -> WKWebView {
+    func makeUIView(context: Context) -> WKWebView { makeWebView(coordinator: context.coordinator) }
+    func makeWebView(coordinator: Coordinator) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
-        configuration.userContentController.add(context.coordinator, name: "edited")
-        configuration.setURLSchemeHandler(context.coordinator, forURLScheme: "trilium-resource")
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        configuration.userContentController.add(coordinator, name: "edited")
+        configuration.setURLSchemeHandler(coordinator, forURLScheme: "trilium-resource")
         let web = WKWebView(frame: .zero, configuration: configuration)
-        web.navigationDelegate = context.coordinator
-        web.isOpaque = false; web.backgroundColor = .clear
+        web.navigationDelegate = coordinator
+        web.isOpaque = false; web.backgroundColor = .systemBackground
+        web.scrollView.backgroundColor = .systemBackground
+        web.scrollView.contentInsetAdjustmentBehavior = .never
         web.scrollView.keyboardDismissMode = .interactive
-        web.loadHTMLString(Self.document, baseURL: URL(string: "about:blank"))
-        context.coordinator.web = web
+        coordinator.web = web
         bridge.web = web; bridge.ready = false
+        bridge.isLoading = true; bridge.displayError = nil
+        web.loadHTMLString(Self.document, baseURL: nil)
         return web
     }
     func updateUIView(_ web: WKWebView, context: Context) {
@@ -43,6 +50,9 @@ struct NoteWebView: UIViewRepresentable {
         if context.coordinator.ready { context.coordinator.sync() }
     }
     static func dismantleUIView(_ web: WKWebView, coordinator: Coordinator) {
+        coordinator.ready = false
+        coordinator.renderRevision += 1
+        coordinator.pendingContent = nil; coordinator.pendingEditing = nil
         if coordinator.parent.bridge.web === web {
             coordinator.parent.bridge.ready = false
             coordinator.parent.bridge.web = nil
@@ -59,21 +69,59 @@ struct NoteWebView: UIViewRepresentable {
         var applied = ""
         var appliedEditing: Bool?
         var lastCommand: UUID?
+        var renderRevision = 0
+        var pendingContent: String?
+        var pendingEditing: Bool?
         var tasks: [ObjectIdentifier: Task<Void, Never>] = [:]
         init(_ parent: NoteWebView) { self.parent = parent; lastCommand = parent.command?.id }
-        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { ready = true; parent.bridge.ready = true; sync() }
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            let revision = renderRevision
+            webView.evaluateJavaScript("typeof setNote === 'function' && typeof flushNote === 'function'") { [weak self] result, error in
+                guard let self, self.renderRevision == revision, self.parent.bridge.web === webView else { return }
+                guard error == nil, result as? Bool == true else { self.failDisplay(); return }
+                self.ready = true
+                self.sync()
+            }
+        }
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { failDisplay() }
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { failDisplay() }
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { failDisplay() }
+        private func failDisplay() {
+            guard let web, parent.bridge.web === web else { return }
+            renderRevision += 1; pendingContent = nil; pendingEditing = nil
+            ready = false; parent.bridge.ready = false
+            parent.bridge.displayError = "笔记排版未能加载，已显示文字内容。可重试排版或编辑 HTML 源码。"
+            parent.bridge.isLoading = false
+        }
         func sync() {
-            guard let web else { return }
+            guard ready, let web else { return }
             if applied != parent.content || appliedEditing != parent.editing {
-                let encoded = Data(parent.content.utf8).base64EncodedString()
-                web.evaluateJavaScript("setNote('\(encoded)', \(parent.editing ? "true" : "false"))")
-                applied = parent.content; appliedEditing = parent.editing
+                if pendingContent == parent.content && pendingEditing == parent.editing { return }
+                let content = parent.content
+                let editing = parent.editing
+                let encoded = Data(content.utf8).base64EncodedString()
+                renderRevision += 1
+                let revision = renderRevision
+                pendingContent = content; pendingEditing = editing
+                web.evaluateJavaScript("setNote('\(encoded)', \(editing ? "true" : "false")); true") { [weak self] _, error in
+                    guard let self, self.renderRevision == revision, self.parent.bridge.web === web else { return }
+                    self.pendingContent = nil; self.pendingEditing = nil
+                    guard error == nil else { self.failDisplay(); return }
+                    self.applied = content; self.appliedEditing = editing
+                    self.parent.bridge.ready = true
+                    self.parent.bridge.isLoading = false
+                    self.parent.bridge.displayError = nil
+                    self.sync()
+                }
+                return
             }
             if parent.editing, let command = parent.command, command.id != lastCommand {
                 lastCommand = command.id
                 let args: [Any] = [command.name, command.value as Any? ?? NSNull()]
                 if let data = try? JSONSerialization.data(withJSONObject: args), let json = String(data: data, encoding: .utf8) {
-                    web.evaluateJavaScript("runCommand(...\(json))")
+                    web.evaluateJavaScript("runCommand(...\(json))") { [weak self] _, error in
+                        if error != nil { self?.failDisplay() }
+                    }
                 }
             }
         }
@@ -125,7 +173,7 @@ struct NoteWebView: UIViewRepresentable {
     private static let document = """
     <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=5">
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src trilium-resource: data:;">
-    <style>:root{color-scheme:light dark}body{font:17px -apple-system,BlinkMacSystemFont,sans-serif;line-height:1.65;margin:20px;color:CanvasText;background:Canvas;overflow-wrap:anywhere}#note{outline:none;min-height:75vh}img{max-width:100%;height:auto}table{max-width:100%;display:block;overflow:auto;border-collapse:collapse}td,th{border:1px solid #8885;padding:8px}pre{overflow:auto;background:#8881;padding:12px;border-radius:10px}blockquote{border-left:3px solid #00a99d;margin-left:0;padding-left:16px}a{color:#009e92}h1,h2,h3{line-height:1.3}input{pointer-events:none}</style></head>
+    <style>:root{color-scheme:light dark}body{font:17px -apple-system,BlinkMacSystemFont,sans-serif;line-height:1.65;margin:20px;color:#1c1c1e;background:#fff;overflow-wrap:anywhere}@media(prefers-color-scheme:dark){body{color:#f2f2f7;background:#1c1c1e}}#note{outline:none;min-height:75vh}img{max-width:100%;height:auto}table{max-width:100%;display:block;overflow:auto;border-collapse:collapse}td,th{border:1px solid #8885;padding:8px}pre{overflow:auto;background:#8881;padding:12px;border-radius:10px}blockquote{border-left:3px solid #00a99d;margin-left:0;padding-left:16px}a{color:#009e92}h1,h2,h3{line-height:1.3}input{pointer-events:none}</style></head>
     <body><article id="note"></article><script>
     const note=document.getElementById('note');let timer;let selection;let modified=false;let rendered='';
     document.addEventListener('selectionchange',()=>{const s=getSelection();if(s.rangeCount&&note.contains(s.anchorNode))selection=s.getRangeAt(0).cloneRange()});
