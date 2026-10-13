@@ -78,18 +78,23 @@ final class NoteDetailPresentationTests: XCTestCase {
 
     @MainActor
     private func waitForBody(in host: DetailHost, expected: String) async throws -> WKWebView {
-        let deadline = ContinuousClock.now.advanced(by: .seconds(20))
+        // Hosted runners can spend nearly 20 seconds starting WebKit before the document loads.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(60))
+        var lastJavaScriptError: String?
         while ContinuousClock.now < deadline {
             try Task.checkCancellation()
             host.layout()
-            if let web = findWebView(in: host.controller.view), web.bounds.width > 0, web.bounds.height > 0,
-               let value = try? await web.evaluateJavaScript("document.getElementById('note')?.textContent"),
-               value as? String == expected {
-                return web
+            if let web = findWebView(in: host.controller.view), web.bounds.width > 0, web.bounds.height > 0 {
+                do {
+                    let value = try await web.evaluateJavaScript("document.getElementById('note')?.textContent")
+                    if value as? String == expected { return web }
+                } catch { lastJavaScriptError = error.localizedDescription }
             }
             try await Task.sleep(for: .milliseconds(100))
         }
-        throw UserFacingError(message: "The hosted SwiftUI detail did not display its Chinese body within 20 seconds.")
+        let editor = host.model.editor(for: "renderNote")
+        let web = findWebView(in: host.controller.view)
+        throw UserFacingError(message: "Detail rendering timed out after 60 seconds. Metadata loaded: \(editor.note != nil); content bytes: \(editor.content.utf8.count); loading: \(editor.loading); failure: \(editor.failure ?? "none"); WebView bounds: \(String(describing: web?.bounds)); JavaScript error: \(lastJavaScriptError ?? "none").")
     }
 
     @MainActor
@@ -114,11 +119,13 @@ final class NoteDetailPresentationTests: XCTestCase {
 
 @MainActor
 private final class DetailHost {
+    let model: AppModel
     let controller: UIViewController
     private let window: UIWindow
     private var closed = false
 
     init(model: AppModel) {
+        self.model = model
         let root = NavigationStack { NoteDetailView(noteID: "renderNote") }.environmentObject(model)
         controller = UIHostingController(rootView: root)
         let frame = CGRect(x: 0, y: 0, width: 390, height: 844)

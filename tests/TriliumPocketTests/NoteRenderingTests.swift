@@ -67,11 +67,61 @@ final class NoteRenderingTests: XCTestCase {
     }
 
     @MainActor
+    func testRendererCreationDoesNotPublishDuringSwiftUIViewUpdate() async throws {
+        let bridge = WebEditorBridge()
+        bridge.isLoading = false
+        let api = APIClient(baseURL: try XCTUnwrap(URL(string: "https://rendering.invalid")), token: "unused")
+        let view = NoteWebView(content: "<p>正文</p>", editing: false, api: api, bridge: bridge,
+                               command: nil, onChange: { _ in }, onNoteLink: { _ in })
+        let coordinator = view.makeCoordinator()
+        var publications = 0
+        let observation = bridge.objectWillChange.sink { publications += 1 }
+        let web = view.makeWebView(coordinator: coordinator)
+        defer {
+            observation.cancel()
+            web.stopLoading()
+            NoteWebView.dismantleUIView(web, coordinator: coordinator)
+        }
+        XCTAssertEqual(publications, 0, "makeUIView must not publish synchronously during a SwiftUI view update.")
+        XCTAssertFalse(bridge.isLoading)
+        // Teardown before deferred initialization must not reactivate a discarded renderer.
+        NoteWebView.dismantleUIView(web, coordinator: coordinator)
+        await Task.yield()
+        XCTAssertEqual(publications, 0)
+    }
+
+    @MainActor
+    func testContentProcessRecoveryReinjectsLatestDraft() async throws {
+        let renderer = try Renderer(content: "<p>原始正文</p>")
+        defer { renderer.close() }
+        try await waitForRender(renderer.bridge)
+        renderer.coordinator.parent = NoteWebView(content: "<p>最新草稿</p>", editing: true,
+                                                 api: renderer.view.api, bridge: renderer.bridge,
+                                                 command: nil, onChange: { _ in }, onNoteLink: { _ in })
+        let previousNavigation = renderer.coordinator.navigation
+        renderer.coordinator.webViewWebContentProcessDidTerminate(renderer.web)
+        if let previousNavigation {
+            renderer.coordinator.webView(renderer.web, didFail: previousNavigation, withError: URLError(.cancelled))
+            renderer.coordinator.webView(renderer.web, didFailProvisionalNavigation: previousNavigation, withError: URLError(.cancelled))
+        }
+        XCTAssertNil(renderer.bridge.displayError, "Callbacks from the previous document must not invalidate recovery.")
+        XCTAssertFalse(renderer.bridge.ready)
+        XCTAssertTrue(renderer.bridge.isLoading)
+        try await waitForRender(renderer.bridge)
+        let text = try await renderer.web.evaluateJavaScript("document.getElementById('note').textContent")
+        XCTAssertEqual(text as? String, "最新草稿")
+        // Bound automatic recovery; a repeated failure must expose the native fallback.
+        renderer.coordinator.webViewWebContentProcessDidTerminate(renderer.web)
+        XCTAssertNotNil(renderer.bridge.displayError)
+        XCTAssertFalse(renderer.bridge.isLoading)
+    }
+
+    @MainActor
     private func waitForRender(_ bridge: WebEditorBridge) async throws {
         let finished = expectation(description: "Renderer finishes bootstrap and initial content injection")
         // Subscribe before yielding to WebKit; a ready renderer also completes immediately.
         let observation = bridge.$isLoading.filter { !$0 }.prefix(1).sink { _ in finished.fulfill() }
-        await fulfillment(of: [finished], timeout: 20)
+        await fulfillment(of: [finished], timeout: 60)
         observation.cancel()
         XCTAssertFalse(bridge.isLoading)
         XCTAssertNil(bridge.displayError)

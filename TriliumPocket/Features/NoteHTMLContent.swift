@@ -39,7 +39,15 @@ struct NoteHTMLContent: View {
                     }.padding(20)
                 }.background(Color(.systemBackground))
             } else if bridge.isLoading {
-                ProgressView("准备笔记…").padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        ProgressView("准备笔记排版…")
+                        let text = HTMLText.plainText(content)
+                        if !text.isEmpty {
+                            Text(text).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+                        }
+                    }.padding(20)
+                }.background(Color(.systemBackground))
             } else if content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !editing {
                 ContentUnavailableView("这条笔记还没有正文", systemImage: "doc", description: Text("点击右上角编辑开始记录。"))
                     .allowsHitTesting(false)
@@ -47,7 +55,7 @@ struct NoteHTMLContent: View {
         }
         .task(id: rendererID) {
             // A failed WebKit bootstrap must not leave an unexplained blank screen.
-            do { try await Task.sleep(for: .seconds(15)) } catch { return }
+            do { try await Task.sleep(for: .seconds(45)) } catch { return }
             if bridge.isLoading {
                 bridge.ready = false
                 bridge.displayError = "笔记排版加载超时，已显示文字内容。"

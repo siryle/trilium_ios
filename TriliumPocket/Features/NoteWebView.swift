@@ -25,11 +25,13 @@ struct NoteWebView: UIViewRepresentable {
     let onNoteLink: (String) -> Void
     struct EditorCommand: Equatable { let id = UUID(); let name: String; var value: String? = nil }
 
+    // Reuse one in-memory store so opening another note does not create a new networking session.
+    private static let dataStore = WKWebsiteDataStore.nonPersistent()
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeUIView(context: Context) -> WKWebView { makeWebView(coordinator: context.coordinator) }
     func makeWebView(coordinator: Coordinator) -> WKWebView {
         let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .nonPersistent()
+        configuration.websiteDataStore = Self.dataStore
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         configuration.userContentController.add(coordinator, name: "edited")
         configuration.setURLSchemeHandler(coordinator, forURLScheme: "trilium-resource")
@@ -41,8 +43,13 @@ struct NoteWebView: UIViewRepresentable {
         web.scrollView.keyboardDismissMode = .interactive
         coordinator.web = web
         bridge.web = web; bridge.ready = false
-        bridge.isLoading = true; bridge.displayError = nil
-        web.loadHTMLString(Self.document, baseURL: nil)
+        // makeUIView runs inside a SwiftUI update; published state belongs to the next main-actor turn.
+        Task { @MainActor [weak coordinator, weak web] in
+            guard let coordinator, let web, !coordinator.ready, coordinator.parent.bridge.web === web else { return }
+            coordinator.parent.bridge.isLoading = true
+            coordinator.parent.bridge.displayError = nil
+        }
+        coordinator.navigation = web.loadHTMLString(Self.document, baseURL: nil)
         return web
     }
     func updateUIView(_ web: WKWebView, context: Context) {
@@ -58,14 +65,20 @@ struct NoteWebView: UIViewRepresentable {
             coordinator.parent.bridge.web = nil
         }
         web.configuration.userContentController.removeScriptMessageHandler(forName: "edited")
-        coordinator.tasks.values.forEach { $0.cancel() }
-        coordinator.tasks.removeAll()
+        coordinator.cancelResourceTasks()
+        coordinator.navigation = nil
+        coordinator.web = nil
+        web.navigationDelegate = nil
+        web.stopLoading()
     }
     @MainActor
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler, WKURLSchemeHandler {
         var parent: NoteWebView
         weak var web: WKWebView?
+        var navigation: WKNavigation?
         var ready = false
+        private var recoveryCount = 0
+        private var resourceGeneration = 0
         var applied = ""
         var appliedEditing: Bool?
         var lastCommand: UUID?
@@ -73,8 +86,14 @@ struct NoteWebView: UIViewRepresentable {
         var pendingContent: String?
         var pendingEditing: Bool?
         var tasks: [ObjectIdentifier: Task<Void, Never>] = [:]
+        func cancelResourceTasks() {
+            resourceGeneration += 1
+            tasks.values.forEach { $0.cancel() }
+            tasks.removeAll()
+        }
         init(_ parent: NoteWebView) { self.parent = parent; lastCommand = parent.command?.id }
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            guard navigation === self.navigation else { return }
             let revision = renderRevision
             webView.evaluateJavaScript("typeof setNote === 'function' && typeof flushNote === 'function'") { [weak self] result, error in
                 guard let self, self.renderRevision == revision, self.parent.bridge.web === webView else { return }
@@ -83,11 +102,28 @@ struct NoteWebView: UIViewRepresentable {
                 self.sync()
             }
         }
-        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { failDisplay() }
-        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { failDisplay() }
-        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { failDisplay() }
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            if navigation === self.navigation { failDisplay() }
+        }
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            if navigation === self.navigation { failDisplay() }
+        }
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            guard parent.bridge.web === webView else { return }
+            guard recoveryCount < 1 else { failDisplay(); return }
+            recoveryCount += 1
+            cancelResourceTasks()
+            renderRevision += 1; pendingContent = nil; pendingEditing = nil
+            ready = false; parent.bridge.ready = false
+            applied = ""; appliedEditing = nil
+            // The model owns the latest draft. Recreate only the document, then inject that draft.
+            parent.bridge.isLoading = true
+            parent.bridge.displayError = nil
+            navigation = webView.loadHTMLString(NoteWebView.document, baseURL: nil)
+        }
         private func failDisplay() {
             guard let web, parent.bridge.web === web else { return }
+            cancelResourceTasks()
             renderRevision += 1; pendingContent = nil; pendingEditing = nil
             ready = false; parent.bridge.ready = false
             parent.bridge.displayError = "笔记排版未能加载，已显示文字内容。可重试排版或编辑 HTML 源码。"
@@ -109,8 +145,8 @@ struct NoteWebView: UIViewRepresentable {
                     guard error == nil else { self.failDisplay(); return }
                     self.applied = content; self.appliedEditing = editing
                     self.parent.bridge.ready = true
-                    self.parent.bridge.isLoading = false
                     self.parent.bridge.displayError = nil
+                    self.parent.bridge.isLoading = false
                     self.sync()
                 }
                 return
@@ -119,8 +155,10 @@ struct NoteWebView: UIViewRepresentable {
                 lastCommand = command.id
                 let args: [Any] = [command.name, command.value as Any? ?? NSNull()]
                 if let data = try? JSONSerialization.data(withJSONObject: args), let json = String(data: data, encoding: .utf8) {
+                    let revision = renderRevision
                     web.evaluateJavaScript("runCommand(...\(json))") { [weak self] _, error in
-                        if error != nil { self?.failDisplay() }
+                        guard let self, self.renderRevision == revision, self.parent.bridge.web === web else { return }
+                        if error != nil { self.failDisplay() }
                     }
                 }
             }
@@ -147,11 +185,14 @@ struct NoteWebView: UIViewRepresentable {
             let parts = url.path.split(separator: "/").map(String.init)
             guard parts.count == 3, ["notes", "attachments"].contains(parts[0]), parts[2] == "content" else { urlSchemeTask.didFailWithError(URLError(.badURL)); return }
             let api = parent.api
+            let generation = resourceGeneration
             tasks[key] = Task { @MainActor in
-                defer { tasks[key] = nil }
+                defer { if resourceGeneration == generation { tasks[key] = nil } }
                 do {
                     let data = try await api.request(parts.joined(separator: "/"))
                     try Task.checkCancellation()
+                    guard resourceGeneration == generation, tasks[key] != nil,
+                          let web, parent.bridge.web === web else { return }
                     let mime: String
                     if data.starts(with: [0x89, 0x50, 0x4e, 0x47]) { mime = "image/png" }
                     else if data.starts(with: [0xff, 0xd8]) { mime = "image/jpeg" }
@@ -161,7 +202,9 @@ struct NoteWebView: UIViewRepresentable {
                     urlSchemeTask.didReceive(URLResponse(url: url, mimeType: mime, expectedContentLength: data.count, textEncodingName: nil))
                     urlSchemeTask.didReceive(data); urlSchemeTask.didFinish()
                 } catch {
-                    if !Task.isCancelled { urlSchemeTask.didFailWithError(error) }
+                    if !Task.isCancelled, resourceGeneration == generation, tasks[key] != nil {
+                        urlSchemeTask.didFailWithError(error)
+                    }
                 }
             }
         }
