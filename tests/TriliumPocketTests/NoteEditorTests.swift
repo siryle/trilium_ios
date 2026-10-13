@@ -182,7 +182,7 @@ private actor EditorServer {
 private final class EditorURLProtocol: URLProtocol {
     typealias Handler = @Sendable (URLRequest) async throws -> (Int, Data)
     static let registry = Registry()
-    private var task: Task<Void, Never>?
+    private var responseTask: Task<Void, Never>?
 
     actor Registry {
         private var handlers: [String: Handler] = [:]
@@ -195,7 +195,7 @@ private final class EditorURLProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
-        task = Task {
+        responseTask = Task {
             do {
                 guard let url = request.url, let host = url.host,
                       let handler = await Self.registry.handler(for: host) else { throw URLError(.unsupportedURL) }
@@ -210,5 +210,5 @@ private final class EditorURLProtocol: URLProtocol {
         }
     }
 
-    override func stopLoading() { task?.cancel() }
+    override func stopLoading() { responseTask?.cancel() }
 }
