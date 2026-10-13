@@ -215,7 +215,10 @@ private struct NoteDetailContent: View {
                     }
                     Menu {
                         Button("重新加载", systemImage: "arrow.clockwise") { Task {
-                            do { await editor.reload(id: noteID, api: model.client(), server: model.configuration.address) } catch { model.report(error) }
+                            do {
+                                let api = try model.client()
+                                await editor.reload(id: noteID, api: api, server: model.configuration.address)
+                            } catch { model.report(error) }
                         } }.disabled(editor.dirty)
                         if note.isEditable {
                             Button("另存为副本", systemImage: "doc.on.doc") { Task {
@@ -262,7 +265,10 @@ private struct NoteDetailContent: View {
         }.accessibilityLabel(title)
     }
     private func load() async {
-        do { await editor.load(id: noteID, api: model.client(), server: model.configuration.address) } catch { model.report(error) }
+        do {
+            let api = try model.client()
+            await editor.load(id: noteID, api: api, server: model.configuration.address)
+        } catch { model.report(error) }
     }
     private func flushEditor() async throws {
         if editor.editing && !editor.sourceEditing && editor.note?.type == "text" {
