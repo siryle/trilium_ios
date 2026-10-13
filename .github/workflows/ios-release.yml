@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing release tag to test and publish (for example v1.0.0)'
-        required: true
+        description: 'Optional existing version tag (leave empty to publish the selected commit as a prerelease)'
+        required: false
         type: string
   push:
     branches: [main]
@@ -29,6 +29,7 @@ jobs:
       sha: ${{ steps.source.outputs.sha }}
       tag: ${{ steps.source.outputs.tag }}
       release: ${{ steps.source.outputs.release }}
+      prerelease: ${{ steps.source.outputs.prerelease }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -42,31 +43,42 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           REQUESTED_TAG: ${{ inputs.tag }}
           EVENT_SHA: ${{ github.sha }}
+          RUN_NUMBER: ${{ github.run_number }}
         shell: bash
         run: |
           set -euo pipefail
           tag=''
           release=false
-          if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
+          prerelease=false
+          sha="$(git rev-parse --verify "${EVENT_SHA}^{commit}")"
+          if [[ "$EVENT_NAME" == workflow_dispatch && -n "$REQUESTED_TAG" ]]; then
             tag="$REQUESTED_TAG"
             release=true
           elif [[ "$EVENT_NAME" == push && "$REF_TYPE" == tag ]]; then
             tag="$REF_NAME"
             release=true
+          elif [[ "$EVENT_NAME" == workflow_dispatch || ( "$EVENT_NAME" == push && "$REF_TYPE" == branch && "$REF_NAME" == main ) ]]; then
+            [[ "$RUN_NUMBER" =~ ^[0-9]+$ ]]
+            tag="build-${RUN_NUMBER}-${sha:0:12}"
+            release=true
+            prerelease=true
           fi
-          if [[ "$release" == true ]]; then
-            # Allow a narrow tag syntax before using it in Git, CLI or filenames.
+          if [[ "$release" == true && "$prerelease" == false ]]; then
+            # Version releases require an existing tag; build tags are created only after tests pass.
             [[ "$tag" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] || { echo 'Invalid release tag'; exit 1; }
             git check-ref-format "refs/tags/$tag"
             sha="$(git rev-parse --verify "refs/tags/${tag}^{commit}")"
             if [[ "$EVENT_NAME" == push ]]; then
               [[ "$sha" == "$(git rev-parse --verify "${EVENT_SHA}^{commit}")" ]] || { echo 'Tag moved after this push'; exit 1; }
             fi
-          else
-            sha="$(git rev-parse --verify "${EVENT_SHA}^{commit}")"
           fi
           [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
-          printf 'sha=%s\ntag=%s\nrelease=%s\n' "$sha" "$tag" "$release" >> "$GITHUB_OUTPUT"
+          printf 'sha=%s\ntag=%s\nrelease=%s\nprerelease=%s\n' "$sha" "$tag" "$release" "$prerelease" >> "$GITHUB_OUTPUT"
+          if [[ "$release" == true ]]; then
+            printf '### IPA publication\n\nRelease: `%s`\n\nTested commit: `%s`\n\nPrerelease: `%s`\n' "$tag" "$sha" "$prerelease" >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf '### Pull request validation\n\nIPA publication is disabled for pull requests.\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   build:
     name: Test and archive on installed Xcode
@@ -84,6 +96,7 @@ jobs:
           set -euo pipefail
           python3 scripts/generate_project.py
           python3 scripts/check_project.py
+          ruby scripts/check_release_workflow.rb
           xcodebuild -version
           xcodebuild -showsdks
       - id: simulator
@@ -205,10 +218,31 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
           TESTED_SHA: ${{ needs.resolve.outputs.sha }}
+          IS_PRERELEASE: ${{ needs.resolve.outputs.prerelease }}
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$RELEASE_TAG" =~ ^v[0-9][A-Za-z0-9._-]*$ ]]
+          [[ "$TESTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$IS_PRERELEASE" == true ]]; then
+            [[ "$RELEASE_TAG" =~ ^build-[0-9]+-[0-9a-f]{12}$ ]]
+            [[ "$RELEASE_TAG" == *"-${TESTED_SHA:0:12}" ]]
+          else
+            [[ "$IS_PRERELEASE" == false ]]
+            [[ "$RELEASE_TAG" =~ ^v[0-9][A-Za-z0-9._-]*$ ]]
+          fi
+          [[ "$(cat release/COMMIT_SHA.txt)" == "$TESTED_SHA" ]]
+          (cd release && sha256sum -c SHA256SUMS.txt)
+          printf 'TriliumPocket for iPhone (iOS 17+).\n\nTested source commit: `%s`\n\nThis IPA is unsigned. It must be signed with a valid Apple identity and provisioning profile before installation on a normal iPhone. No Apple signing credentials are used by this workflow.\n' "$TESTED_SHA" > release-notes.md
+          if ! gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+            if [[ "$IS_PRERELEASE" == true ]]; then
+              # Create an immutable build tag at the tested commit, never at the current main HEAD.
+              gh release create "$RELEASE_TAG" --repo "$GH_REPO" --prerelease --latest=false \
+                --target "$TESTED_SHA" --title "TriliumPocket $RELEASE_TAG" --notes-file release-notes.md
+            else
+              gh release create "$RELEASE_TAG" --repo "$GH_REPO" --verify-tag \
+                --target "$TESTED_SHA" --title "TriliumPocket $RELEASE_TAG" --notes-file release-notes.md
+            fi
+          fi
           [[ "$TESTED_SHA" =~ ^[0-9a-f]{40}$ ]]
           object="$(gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" --jq '.object | [.type, .sha] | @tsv')"
           read -r kind sha <<< "$object"
@@ -220,13 +254,7 @@ jobs:
             read -r kind sha <<< "$object"
           done
           [[ "$kind" == commit && "$sha" == "$TESTED_SHA" ]] || { echo 'Release tag no longer identifies the tested commit'; exit 1; }
-          [[ "$(cat release/COMMIT_SHA.txt)" == "$TESTED_SHA" ]]
-          (cd release && sha256sum -c SHA256SUMS.txt)
-          printf 'TriliumPocket for iPhone (iOS 17+).\n\nTested source commit: `%s`\n\nThis IPA is unsigned. It must be signed with a valid Apple identity and provisioning profile before installation on a normal iPhone. No Apple signing credentials are used by this workflow.\n' "$TESTED_SHA" > release-notes.md
-          if ! gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --repo "$GH_REPO" --verify-tag \
-              --target "$TESTED_SHA" --title "TriliumPocket $RELEASE_TAG" --notes-file release-notes.md
-          fi
           gh release upload "$RELEASE_TAG" --repo "$GH_REPO" --clobber \
             "release/TriliumPocket-${RELEASE_TAG}-unsigned.ipa" \
             release/SHA256SUMS.txt release/COMMIT_SHA.txt
+          printf '### Published unsigned IPA\n\nRelease: https://github.com/%s/releases/tag/%s\n\nIPA: `TriliumPocket-%s-unsigned.ipa`\n' "$GH_REPO" "$RELEASE_TAG" "$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"

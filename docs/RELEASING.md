@@ -13,9 +13,10 @@ TriliumPocket 是面向 iPhone 的原生 SwiftUI 应用，最低支持 iOS 17。
 
 ## CI 与发布入口
 
-- 向 `main` 推送，或创建以 `main` 为目标的 Pull Request：生成工程、执行 XCTest、生成未签名 iOS archive；不发布 Release。
-- 推送 `v*` 标签：验证标签后，对标签对应提交测试、归档并上传未签名 IPA 到同名 GitHub Release。
-- 手动运行 Actions → iOS CI and unsigned release → Run workflow：选择含此工作流的可信分支，在 `tag` 中填写**已经存在于 GitHub 的标签**，例如 `v1.0.0`。工作流会检出该标签所指向的提交，而不是直接发布当前所选分支。目标标签的代码也必须包含生成器和源文件。
+- 向 `main` 推送：生成工程、执行 XCTest、归档，成功后自动打包未签名 IPA 并上传到 `build-<运行编号>-<12 位提交 SHA>` 预发布 Release。无需先创建版本标签，不会替换正式版本的 Latest 标记。
+- 创建以 `main` 为目标的 Pull Request：只验证测试及归档，不发布 Release。
+- 推送 `v*` 标签：验证标签后，对标签对应提交测试、归档并上传未签名 IPA 到同名正式 GitHub Release。
+- 手动运行 Actions → iOS CI and unsigned release → Run workflow：选择含此工作流的可信分支，`tag` **留空**即可发布所选提交的预发布版本。若填写已经存在于 GitHub 的版本标签，例如 `v1.0.0`，则发布该标签指向的提交。目标代码也必须包含生成器和源文件。
 
 标签只允许 `v` 开头、紧接数字、其余为 ASCII 字母、数字、点、下划线或连字符，并且必须满足 Git 的合法标签规则。例如 `v1.0.0`、`v1.1.0-beta.1`；不接受斜杠、空格、shell 字符或换行。发布已有代码的操作示例：
 
@@ -24,7 +25,7 @@ git tag v1.0.0 <intended-commit-sha>
 git push github v1.0.0
 ```
 
-同名标签的手动运行和标签推送共用队列，发布 job 也按标签串行执行。工作流先固定提交 SHA，测试和归档使用同一工作树；发布前重新读取远端标签（支持 annotated tag），如果标签已移动，则失败并停止上传。重新运行相同标签时，成功验证后会替换该 Release 中同名附件。发布后不要移动版本标签。
+同名版本标签的手动运行和标签推送共用队列，发布 job 也按标签串行执行。工作流先固定提交 SHA，测试和归档使用同一工作树；上传附件前读取远端标签（支持 annotated tag），如果标签指向其他提交，则失败并停止上传。自动预发布在测试成功后创建唯一 build 标签，明确指向测试提交，不会随 main 后续变动。重新运行同一次工作流会复用该预发布标签并替换同名附件。发布后不要移动版本标签。
 
 ## 工程与构建行为
 
@@ -50,6 +51,6 @@ git push github v1.0.0
 
 ## 验证边界与排错
 
-本次实现只运行工程生成器及静态结构检查，不执行本地 Xcode 构建、依赖安装或浏览器测试。首次 GitHub Actions 运行才会验证实际 Swift 编译、XCTest、SDK/模拟器兼容性和 archive 打包结果。GitHub 托管镜像会更新；如果镜像不再提供可用 iPhone simulator 或匹配 SDK，工作流会给出明确错误，需根据 runner 日志调整其镜像。
+本地只运行工程生成器及静态结构检查，不执行 Xcode 构建、依赖安装或浏览器测试。用户提供的 Actions 截图已确认测试和未签名 archive 成功；修改后的发布分支仍需在 GitHub Actions 验证打包及附件上传。GitHub 托管镜像会更新；如果镜像不再提供可用 iPhone simulator 或匹配 SDK，工作流会给出明确错误，需根据 runner 日志调整其镜像。
 
 测试失败时查看 `ios-test-results-<sha>` artifact 中的 `test.log`/`.xcresult`；归档失败时查看 `archive.log`。找不到标签时，先确保标签已经推送到 **GitHub**，只在 Gitea 创建标签不会触发这个流程。Release 写权限被拒绝时检查组织/仓库 Actions 策略。当前实现没有触发远端工作流；实际运行结果应以 GitHub Actions 日志为准。

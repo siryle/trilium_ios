@@ -45,8 +45,10 @@ Trilium 的公开 ETAPI 不包含 AI 对话生成接口，服务端浏览器的 
 
 参见 [GitHub Actions 发布说明](docs/RELEASING.md)。
 
-- 推送 `main` 或创建 PR：执行模拟器 XCTest 及未签名 iPhone 归档验证。
-- 推送 `v1.0.0` 一类版本标签，或手动触发并选择已存在的版本标签：测试后生成 `TriliumPocket-<tag>-unsigned.ipa`，上传到 GitHub Releases，附 SHA-256 校验和及源提交 ID。
+- 推送 `main`：测试和归档成功后，生成未签名 IPA 并自动上传到 `build-<运行编号>-<提交短 SHA>` 预发布 Release。
+- 创建 PR：只执行模拟器 XCTest 及归档验证，不发布。
+- 推送 `v1.0.0` 一类版本标签：测试后上传到同名正式 Release。
+- 手动运行工作流：留空 `tag` 发布所选提交的预发布版本；填写已有版本标签则发布该标签。所有 Release 附 SHA-256 校验和及源提交 ID。
 - 不需要 Apple 证书、描述文件或签名 Secrets，也不执行任何第三方依赖安装。
 - 未签名 IPA 需要使用你选择的签名工具和有效的 Apple 签名后，才能安装到普通 iPhone。
 
