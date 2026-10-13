@@ -11,6 +11,7 @@ final class AppModel: ObservableObject {
     @Published var changeVersion = 0
     private let keychain = Keychain()
     private let store = LocalStore()
+    private let injectedClient: APIClient?
     private var editors: [String: NoteEditorModel] = [:]
 
     func editor(for noteID: String) -> NoteEditorModel {
@@ -20,13 +21,21 @@ final class AppModel: ObservableObject {
         return editor
     }
 
-    init() {
-        configuration = store.load("configuration", as: ServerConfiguration.self) ?? ServerConfiguration()
+    init(client: APIClient? = nil) {
+        injectedClient = client
+        if let client {
+            var settings = ServerConfiguration()
+            settings.address = client.baseURL.absoluteString
+            configuration = settings
+        } else {
+            configuration = store.load("configuration", as: ServerConfiguration.self) ?? ServerConfiguration()
+        }
     }
-    var isConfigured: Bool { !configuration.address.isEmpty && !token.isEmpty }
+    var isConfigured: Bool { injectedClient != nil || (!configuration.address.isEmpty && !token.isEmpty) }
     var token: String { keychain.read("etapi") }
     var aiKey: String { keychain.read("ai") }
     func client() throws -> APIClient {
+        if let injectedClient { return injectedClient }
         guard !token.isEmpty else { throw UserFacingError(message: "请先在设置中填写 ETAPI 令牌。") }
         return APIClient(baseURL: try APIClient.validatedURL(configuration.address, allowHTTP: configuration.allowHTTP), token: token)
     }

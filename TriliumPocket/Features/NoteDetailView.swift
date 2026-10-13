@@ -118,6 +118,7 @@ final class NoteEditorModel: ObservableObject {
     }
 }
 
+@MainActor
 struct NoteDetailView: View {
     @EnvironmentObject private var model: AppModel
     let noteID: String
@@ -134,9 +135,13 @@ private struct NoteDetailContent: View {
     @State private var preparingSave = false
     @State private var linkedNote: Note?
     @State private var discard = false
+    @State private var showPlainText = false
     var body: some View {
-        Group {
-            if editor.loading { ProgressView("加载笔记…") }
+        // Keep a real view mounted before metadata arrives so the loading task has a stable lifecycle.
+        VStack(spacing: 0) {
+            if editor.loading || (editor.note == nil && editor.failure == nil) {
+                ProgressView("加载笔记…").frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
             else if let failure = editor.failure {
                 ContentUnavailableView {
                     Label("无法加载笔记", systemImage: "wifi.exclamationmark")
@@ -158,6 +163,12 @@ private struct NoteDetailContent: View {
                         ScrollView { Image(uiImage: image).resizable().scaledToFit().padding() }
                     } else if note.type == "file" {
                         ContentUnavailableView("附件笔记", systemImage: "paperclip", description: Text("当前版本支持文本和图片阅读。此附件请在 Trilium 中查看。"))
+                    } else if note.type == "text", showPlainText && !editor.editing {
+                        ScrollView {
+                            Text(HTMLText.plainText(editor.content).isEmpty ? "此笔记没有可显示的文字。" : HTMLText.plainText(editor.content))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled).padding(20)
+                        }
                     } else if note.type == "text", (!editor.editing || !editor.sourceEditing), let api = try? model.client() {
                         NoteHTMLContent(content: editor.content, editing: editor.editing && !editor.saving,
                                         api: api, bridge: webBridge, command: command,
@@ -207,6 +218,7 @@ private struct NoteDetailContent: View {
                 }
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationTitle(editor.note?.title ?? "笔记")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar, .tabBar)
@@ -220,6 +232,9 @@ private struct NoteDetailContent: View {
                         } else { Button("编辑") { editor.editing = true } }
                     }
                     Menu {
+                        if note.type == "text" && !editor.editing {
+                            Button(showPlainText ? "显示排版正文" : "显示纯文字正文", systemImage: "doc.plaintext") { showPlainText.toggle() }
+                        }
                         Button("重新加载", systemImage: "arrow.clockwise") { Task {
                             do {
                                 let api = try model.client()
@@ -274,7 +289,10 @@ private struct NoteDetailContent: View {
         do {
             let api = try model.client()
             await editor.load(id: noteID, api: api, server: model.configuration.address)
-        } catch { model.report(error) }
+        } catch {
+            editor.failure = error.localizedDescription
+            model.report(error)
+        }
     }
     private func flushEditor() async throws {
         if editor.editing && !editor.sourceEditing && editor.note?.type == "text" {
