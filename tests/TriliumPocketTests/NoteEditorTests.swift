@@ -152,6 +152,37 @@ final class NoteEditorTests: XCTestCase {
         XCTAssertFalse(HTMLText.requiresSourceEditing(ordinary))
     }
 
+    @MainActor
+    func testEscapedCodeAndAttributeDescriptionsRemainRichTextEditable() {
+        let ordinary = [
+            "<pre><code>&lt;img src=x onerror=alert(1)&gt;</code></pre>",
+            "<p>Examples: onclick='alert(1)', srcset=x, action=/submit, href=javascript:alert.</p>",
+            #"<p title="Examples: onclick='alert(1)' href='javascript:alert' >">Description</p>"#,
+            #"<a href="https://example.com/?hint=onclick">Link</a>"#,
+            "<p>UTF-8: \u{4F60}\u{597D}</p><br />"
+        ]
+        for html in ordinary { XCTAssertFalse(HTMLText.requiresSourceEditing(html), html) }
+    }
+
+    @MainActor
+    func testActualUnsupportedAttributesAndLinksStillRequireSourceEditing() {
+        let complex = [
+            #"<img src="local" onerror="alert(1)">"#,
+            #"<p title="Literal > text" ONCLICK="alert(1)">Interactive</p>"#,
+            #"<img srcset="a.png 1x, b.png 2x">"#,
+            #"<p contenteditable="true">Editable</p>"#,
+            #"<img data-trilium-original-src="local">"#,
+            #"<img data-trilium-original-alt="original">"#,
+            #"<button formaction="/submit">Submit</button>"#,
+            #"<a HREF=" JAVASCRIPT:alert(1) ">Unsafe</a>"#,
+            #"<a href=https://example.com>Unquoted</a>"#,
+            #"<p title="Description"onclick="alert(1)">Malformed</p>"#,
+            #"<img onerror="unterminated"#,
+            #"<script src="unterminated"#
+        ]
+        for html in complex { XCTAssertTrue(HTMLText.requiresSourceEditing(html), html) }
+    }
+
     private func makeClient(handler: @escaping EditorURLProtocol.Handler) async throws -> APIClient {
         let url = try XCTUnwrap(URL(string: "https://editor-\(UUID().uuidString.lowercased()).example.com/trilium/"))
         await EditorURLProtocol.registry.register(host: try XCTUnwrap(url.host), handler: handler)

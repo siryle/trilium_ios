@@ -3,6 +3,19 @@ import UIKit
 
 @MainActor
 enum HTMLText {
+    private static let openingTags = try? NSRegularExpression(
+        pattern: #"<([A-Za-z][A-Za-z0-9:-]*)((?:"[^"]*"|'[^']*'|[^'">])*)>"#)
+    private static let attributes = try? NSRegularExpression(
+        pattern: #"\s+([^\s=/'"<>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?"#)
+    private static let unsupportedTags: Set<String> = [
+        "script", "style", "iframe", "object", "embed", "link", "meta", "base", "form",
+        "svg", "math", "audio", "video", "canvas", "html", "head", "body"
+    ]
+    private static let unsupportedAttributes: Set<String> = [
+        "srcset", "action", "formaction", "contenteditable",
+        "data-trilium-original-src", "data-trilium-original-alt"
+    ]
+
     static func escape(_ value: String) -> String {
         value.replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
@@ -14,14 +27,33 @@ enum HTMLText {
         value.components(separatedBy: "\n").map { "<p>\(escape($0).isEmpty ? "<br>" : escape($0))</p>" }.joined()
     }
     static func requiresSourceEditing(_ html: String) -> Bool {
-        let unsupported = "(?i)<(?:script|style|iframe|object|embed|link|meta|base|form|svg|math|audio|video|canvas|html|head|body)\\b|\\s(?:on[a-z]+|srcset|action|formaction|contenteditable|data-trilium-original-src|data-trilium-original-alt)\\s*=|href\\s*=\\s*[^\\\"'\\s>]"
-        if html.range(of: unsupported, options: .regularExpression) != nil { return true }
-        guard let regex = try? NSRegularExpression(pattern: "(?i)href\\s*=\\s*[\\\"']([^\\\"']*)[\\\"']") else { return true }
+        guard let openingTags, let attributes else { return true }
         let string = html as NSString
-        return regex.matches(in: html, range: NSRange(location: 0, length: string.length)).contains { match in
-            let href = string.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            return !["https:", "http:", "mailto:", "#", "/"].contains(where: { href.hasPrefix($0) })
+        for tag in openingTags.matches(in: html, range: NSRange(location: 0, length: string.length)) {
+            let name = string.substring(with: tag.range(at: 1)).lowercased()
+            if unsupportedTags.contains(name) { return true }
+            // Escaped code and quoted attribute values are text, not executable attributes.
+            let source = string.substring(with: tag.range(at: 2)) as NSString
+            var end = 0
+            for attribute in attributes.matches(in: source as String, range: NSRange(location: 0, length: source.length)) {
+                guard attribute.range.location == end else { return true }
+                end = NSMaxRange(attribute.range)
+                let name = source.substring(with: attribute.range(at: 1)).lowercased()
+                if unsupportedAttributes.contains(name) ||
+                    name.range(of: "^on[a-z]+$", options: .regularExpression) != nil { return true }
+                if name == "href" {
+                    let quoted = [2, 3].map { attribute.range(at: $0) }.first { $0.location != NSNotFound }
+                    guard let quoted else { return true }
+                    let href = source.substring(with: quoted).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                    if !["https:", "http:", "mailto:", "#", "/"].contains(where: { href.hasPrefix($0) }) { return true }
+                }
+            }
+            let remainder = source.substring(from: end).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !remainder.isEmpty && remainder != "/" { return true }
         }
+        let remaining = openingTags.stringByReplacingMatches(
+            in: html, range: NSRange(location: 0, length: string.length), withTemplate: "")
+        return remaining.range(of: "<[A-Za-z]", options: .regularExpression) != nil
     }
     static func plainText(_ html: String) -> String {
         // Avoid NSAttributedString's HTML importer: it can fetch remote resources.
