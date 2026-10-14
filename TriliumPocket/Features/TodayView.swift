@@ -1,10 +1,11 @@
 import SwiftUI
+import UIKit
 
 struct TodayView: View {
     @EnvironmentObject private var model: AppModel
     @State private var note: Note?
     @State private var loading = false
-    @State private var quickText = ""
+    @State private var draft = QuickCaptureDraft()
     @State private var showCapture = false
     @State private var lastCapture: Note?
     @State private var draftLoaded = false
@@ -28,11 +29,12 @@ struct TodayView: View {
                             Label("快速记录", systemImage: "square.and.pencil").font(.headline)
                             Text("保存为今日日记下面的一条子笔记，保留日记模板和已有内容。")
                                 .font(.footnote).foregroundStyle(.secondary)
-                            if !quickText.isEmpty {
-                                Text(quickText).lineLimit(3).foregroundStyle(.secondary)
+                            if !draft.isEmpty {
+                                if !draft.title.isEmpty { Text(draft.title).font(.headline) }
+                                Text(draft.plainText).lineLimit(3).foregroundStyle(.secondary)
                                 Label("本机草稿已保留", systemImage: "doc.badge.clock").font(.caption).foregroundStyle(.secondary)
                             }
-                            Button(quickText.isEmpty ? "写一条记录" : "继续草稿") { showCapture = true }
+                            Button(draft.isEmpty ? "写一条记录" : "继续草稿") { showCapture = true }
                                 .buttonStyle(.bordered).disabled(loading)
                         }
                         if let lastCapture {
@@ -51,14 +53,16 @@ struct TodayView: View {
         .navigationTitle("今天").navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar, .tabBar)
         .navigationDestination(item: $note) { NoteDetailView(noteID: $0.id) }
-        .sheet(isPresented: $showCapture) {
-            QuickCaptureView(text: $quickText) { saved in lastCapture = saved }
+        .fullScreenCover(isPresented: $showCapture) {
+            QuickCaptureView(draft: $draft) { saved in lastCapture = saved }
         }
         .onAppear {
             guard !draftLoaded else { return }; draftLoaded = true
-            quickText = LocalStore().load(draftName, as: String.self) ?? ""
+            let store = LocalStore()
+            draft = store.load(draftName, as: QuickCaptureDraft.self)
+                ?? QuickCaptureDraft(plainText: store.load(draftName, as: String.self) ?? "")
         }
-        .onChange(of: quickText) { _, value in
+        .onChange(of: draft) { _, value in
             do { try LocalStore().save(value, name: draftName) } catch { model.report(error) }
         }
     }
@@ -69,53 +73,165 @@ struct TodayView: View {
     }
 }
 
+struct QuickCaptureDraft: Codable, Equatable {
+    var title = ""
+    var content = ""
+
+    init(title: String = "", content: String = "") {
+        self.title = title; self.content = content
+    }
+    @MainActor init(plainText: String) {
+        content = plainText.isEmpty ? "" : HTMLText.paragraphs(plainText)
+    }
+    @MainActor var plainText: String { HTMLText.plainText(content) }
+    @MainActor var isEmpty: Bool { title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && plainText.isEmpty }
+    @MainActor func noteTitle(at date: Date = .now) -> String {
+        let title = self.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !title.isEmpty { return title }
+        let formatter = DateFormatter(); formatter.dateFormat = "HH:mm"
+        let firstLine = plainText.components(separatedBy: .newlines).first ?? ""
+        return "\(formatter.string(from: date)) · \(firstLine.isEmpty ? "随手记" : String(firstLine.prefix(40)))"
+    }
+}
+
+@MainActor
 private struct QuickCaptureView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
-    @Binding var text: String
+    @Binding var draft: QuickCaptureDraft
     let onSaved: (Note) -> Void
     @State private var saving = false
-    @FocusState private var focused: Bool
+    @State private var preparingSave = false
+    @State private var preview = false
+    @State private var sourceEditing = false
+    @State private var error: String?
+    @State private var command: NoteWebView.EditorCommand?
+    @State private var requestedFocus = false
+    @StateObject private var bridge = WebEditorBridge()
+    @FocusState private var titleFocused: Bool
+
+    private var busy: Bool { saving || preparingSave }
 
     var body: some View {
-        NavigationStack {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("记录会保存为今日日记的子笔记。返回今天时，未保存的草稿会保留。")
-                    .font(.footnote).foregroundStyle(.secondary)
-                TextEditor(text: $text).focused($focused).disabled(saving)
-                    .scrollContentBackground(.hidden)
+        VStack(alignment: .leading, spacing: 0) {
+            header.padding(.horizontal, 12).padding(.top, 8)
+            TextField("日记标题", text: $draft.title, prompt: Text("未命名").foregroundColor(.primary), axis: .vertical)
+                .font(.largeTitle.bold())
+                .focused($titleFocused)
+                .disabled(preview || busy)
+                .padding(.horizontal, 24).padding(.top, 28).padding(.bottom, 8)
+                .accessibilityLabel("日记标题")
+            if sourceEditing && !preview {
+                TextEditor(text: $draft.content)
+                    .font(.system(.body, design: .monospaced))
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    .scrollContentBackground(.hidden).padding(.horizontal, 16)
+                    .disabled(busy)
+            } else if let api = try? model.client() {
+                NoteHTMLContent(content: draft.content, editing: !preview && !saving,
+                                api: api, bridge: bridge, command: command,
+                                onChange: { draft.content = $0 },
+                                onSourceEdit: { sourceEditing = true; preview = false },
+                                onNoteLink: { _ in })
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }.padding(20)
-            .background(Color(.systemBackground))
-            .navigationTitle("快速记录").navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("返回今天") { focused = false; dismiss() }.disabled(saving)
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button(saving ? "保存中…" : "保存") { Task { await capture() } }
-                        .disabled(saving || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-                ToolbarItemGroup(placement: .keyboard) {
-                    Spacer()
-                    Button("完成") { focused = false }
-                }
+                    .allowsHitTesting(!preparingSave)
             }
-            .interactiveDismissDisabled(saving)
         }
+        .background(Color(.systemBackground))
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if !preview {
+                NoteEditorToolbar(command: $command, formattingEnabled: !sourceEditing && bridge.ready,
+                                  onDismissKeyboard: hideKeyboard)
+                    .disabled(busy)
+            }
+        }
+        .interactiveDismissDisabled(busy)
+        .onChange(of: bridge.isLoading) { _, loading in
+            guard !loading, bridge.ready, !requestedFocus, !preview, !sourceEditing, !titleFocused, !busy else { return }
+            requestedFocus = true
+            bridge.web?.evaluateJavaScript("document.getElementById('note').focus()", completionHandler: nil)
+        }
+        .alert("无法完成操作", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
+            Button("好", role: .cancel) { error = nil }
+        } message: { Text(error ?? "") }
+    }
+
+    private var header: some View {
+        HStack {
+            Button { Task { await leave() } } label: {
+                Image(systemName: "sidebar.left").frame(width: 44, height: 44)
+            }
+            .background(Color(.systemBackground), in: Circle())
+            .shadow(color: .black.opacity(0.06), radius: 12, y: 4)
+            .accessibilityLabel("返回今天并保留草稿")
+            Spacer()
+            if saving { ProgressView().padding(.trailing, 12) }
+            HStack(spacing: 0) {
+                Button { Task { await togglePreview() } } label: {
+                    Image(systemName: preview ? "square.and.pencil" : "book")
+                        .frame(width: 48, height: 44)
+                }.accessibilityLabel(preview ? "继续编辑" : "阅读预览")
+                Menu {
+                    Button("保存到今日日记", systemImage: "checkmark") { Task { await capture() } }
+                        .disabled(draft.isEmpty || (!sourceEditing && !bridge.ready))
+                    Button("收起键盘", systemImage: "keyboard.chevron.compact.down", action: hideKeyboard)
+                    if sourceEditing {
+                        Button("切换到富文本编辑", systemImage: "textformat") { hideKeyboard(); sourceEditing = false }
+                            .disabled(HTMLText.requiresSourceEditing(draft.content))
+                    }
+                    Button("返回今天，保留草稿", systemImage: "arrow.backward") { Task { await leave() } }
+                } label: {
+                    Image(systemName: "ellipsis").frame(width: 44, height: 44)
+                }.accessibilityLabel("更多操作")
+            }
+            .padding(.horizontal, 4)
+            .background(Color(.systemBackground), in: Capsule())
+            .shadow(color: .black.opacity(0.06), radius: 12, y: 4)
+        }
+        .font(.system(size: 22)).foregroundStyle(.primary).disabled(busy)
+    }
+
+    private func hideKeyboard() {
+        titleFocused = false
+        bridge.web?.endEditing(true)
+        // Also dismiss the native source editor when the renderer is not mounted.
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    }
+    private func flushEditor() async throws {
+        titleFocused = false
+        if !preview && !sourceEditing && bridge.ready {
+            let previous = draft.content
+            if let latest = try await bridge.flush() {
+                guard draft.content == previous || draft.content == latest else {
+                    throw UserFacingError(message: "编辑内容发生变化，草稿已保留，请重试。")
+                }
+                draft.content = latest
+            }
+        }
+        hideKeyboard()
+    }
+    private func leave() async {
+        guard !busy else { return }
+        preparingSave = true; defer { preparingSave = false }
+        do { try await flushEditor(); dismiss() } catch { self.error = error.localizedDescription }
+    }
+    private func togglePreview() async {
+        guard !busy else { return }
+        preparingSave = true; defer { preparingSave = false }
+        do { try await flushEditor(); preview.toggle() } catch { self.error = error.localizedDescription }
     }
     private func capture() async {
-        guard !saving else { return }
-        focused = false
-        let snapshot = text
-        saving = true; defer { saving = false }
+        guard !busy, !draft.isEmpty else { return }
+        preparingSave = true
+        defer { preparingSave = false; saving = false }
         do {
+            try await flushEditor()
+            let snapshot = draft
+            saving = true
             let api = try model.client()
             let day = try await api.dayNote()
-            let firstLine = snapshot.components(separatedBy: .newlines).first ?? "随手记"
-            let formatter = DateFormatter(); formatter.dateFormat = "HH:mm"
-            let result = try await api.create(parentID: day.id, title: "\(formatter.string(from: Date())) · \(firstLine.prefix(40))", content: HTMLText.paragraphs(snapshot))
-            text = ""; onSaved(result); model.changeVersion += 1; dismiss()
-        } catch { model.report(error) }
+            let result = try await api.create(parentID: day.id, title: snapshot.noteTitle(), content: snapshot.content)
+            draft = QuickCaptureDraft(); onSaved(result); model.changeVersion += 1; dismiss()
+        } catch { self.error = error.localizedDescription }
     }
 }

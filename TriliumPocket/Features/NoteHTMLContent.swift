@@ -64,3 +64,52 @@ struct NoteHTMLContent: View {
         }
     }
 }
+
+@MainActor
+struct NoteEditorToolbar: View {
+    @Binding var command: NoteWebView.EditorCommand?
+    var formattingEnabled = true
+    let onDismissKeyboard: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 4) {
+                    formatButton("撤销", icon: "arrow.uturn.backward", name: "undo")
+                    formatButton("重做", icon: "arrow.uturn.forward", name: "redo")
+                    formatButton("列表", icon: "list.bullet", name: "insertUnorderedList")
+                    formatButton("编号", icon: "list.number", name: "insertOrderedList")
+                    formatButton("引用", icon: "text.quote", name: "formatBlock", value: "blockquote")
+                    Menu {
+                        Button("标题") { run("formatBlock", value: "h2") }
+                        Button("正文") { run("formatBlock", value: "p") }
+                    } label: {
+                        Image(systemName: "textformat.size").frame(width: 40, height: 44)
+                    }.accessibilityLabel("标题与正文")
+                    formatButton("加粗", icon: "bold", name: "bold")
+                    formatButton("斜体", icon: "italic", name: "italic")
+                }.padding(.horizontal, 8)
+            }
+            .disabled(!formattingEnabled)
+            .background(Color(.systemBackground), in: Capsule())
+            Button(action: onDismissKeyboard) {
+                Image(systemName: "keyboard.chevron.compact.down").frame(width: 44, height: 44)
+            }
+            .background(Color(.systemBackground), in: Circle())
+            .accessibilityLabel("收起键盘")
+        }
+        .font(.system(size: 21)).foregroundStyle(.primary).buttonStyle(.plain)
+        .shadow(color: .black.opacity(0.06), radius: 12, y: 4)
+        .padding(.horizontal, 8).padding(.vertical, 8)
+        .background(Color(.systemBackground).opacity(0.95))
+    }
+
+    private func formatButton(_ title: String, icon: String, name: String, value: String? = nil) -> some View {
+        Button { run(name, value: value) } label: {
+            Image(systemName: icon).frame(width: 40, height: 44)
+        }.accessibilityLabel(title)
+    }
+    private func run(_ name: String, value: String? = nil) {
+        command = NoteWebView.EditorCommand(name: name, value: value)
+    }
+}

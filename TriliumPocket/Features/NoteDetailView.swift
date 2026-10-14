@@ -201,19 +201,9 @@ private struct NoteDetailContent: View {
                 .allowsHitTesting(!preparingSave)
                 .safeAreaInset(edge: .bottom) {
                     if editor.editing && note.type == "text" && !editor.sourceEditing {
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 20) {
-                                formatButton("加粗", icon: "bold", command: "bold")
-                                formatButton("斜体", icon: "italic", command: "italic")
-                                formatButton("标题", icon: "textformat.size", command: "formatBlock", value: "h2")
-                                formatButton("正文", icon: "paragraph", command: "formatBlock", value: "p")
-                                formatButton("列表", icon: "list.bullet", command: "insertUnorderedList")
-                                formatButton("编号", icon: "list.number", command: "insertOrderedList")
-                                formatButton("引用", icon: "text.quote", command: "formatBlock", value: "blockquote")
-                                formatButton("撤销", icon: "arrow.uturn.backward", command: "undo")
-                                formatButton("重做", icon: "arrow.uturn.forward", command: "redo")
-                            }.padding(.horizontal, 20).padding(.vertical, 10)
-                        }.background(.bar).disabled(editor.saving || preparingSave)
+                        NoteEditorToolbar(command: $command, formattingEnabled: webBridge.ready,
+                                          onDismissKeyboard: { webBridge.web?.endEditing(true) })
+                            .disabled(editor.saving || preparingSave)
                     }
                 }
             }
@@ -279,11 +269,6 @@ private struct NoteDetailContent: View {
             } }
             Button("保留本机草稿", role: .cancel) { }
         } message: { Text("为避免覆盖其他设备的修改，当前草稿已保留。可以保存为新副本，再对照整理。") }
-    }
-    private func formatButton(_ title: String, icon: String, command name: String, value: String? = nil) -> some View {
-        Button { command = NoteWebView.EditorCommand(name: name, value: value) } label: {
-            Image(systemName: icon).frame(minWidth: 24, minHeight: 24)
-        }.accessibilityLabel(title)
     }
     private func load() async {
         do {

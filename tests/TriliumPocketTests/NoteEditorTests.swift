@@ -4,6 +4,36 @@ import XCTest
 
 final class NoteEditorTests: XCTestCase {
     @MainActor
+    func testQuickCaptureMigratesPlainTextWithoutInterpretingHTML() {
+        let text = "今天 <script>alert('日记')</script> & 明天\n第二段记录"
+        let draft = QuickCaptureDraft(plainText: text)
+
+        XCTAssertEqual(draft.plainText, text)
+        XCTAssertFalse(draft.content.contains("<script>"))
+        XCTAssertTrue(draft.content.contains("&lt;script&gt;"))
+        XCTAssertEqual(QuickCaptureDraft(plainText: "").content, "")
+    }
+
+    @MainActor
+    func testQuickCaptureDraftRoundTripPreservesTitleAndRichText() throws {
+        let draft = QuickCaptureDraft(title: "今日心得", content: "<h2>工作</h2><p><strong>完成</strong></p><ul><li>明天继续</li></ul>")
+        let restored = try JSONDecoder().decode(QuickCaptureDraft.self, from: JSONEncoder().encode(draft))
+
+        XCTAssertEqual(restored, draft)
+        XCTAssertEqual(restored.noteTitle(), "今日心得")
+        XCTAssertFalse(restored.isEmpty)
+    }
+
+    @MainActor
+    func testQuickCaptureUntitledNoteUsesVisibleBodyAndIgnoresEmptyEditorMarkup() {
+        let draft = QuickCaptureDraft(content: "<p><strong>第一行</strong> &amp; 内容</p><p>第二行</p>")
+        XCTAssertTrue(draft.noteTitle().hasSuffix(" · 第一行 & 内容"))
+        XCTAssertEqual(QuickCaptureDraft(title: "  自定义标题\n", content: "<p>正文</p>").noteTitle(), "自定义标题")
+        XCTAssertTrue(QuickCaptureDraft(content: "<p><br></p><div>&nbsp;</div>").isEmpty)
+        XCTAssertFalse(QuickCaptureDraft(title: "只有标题").isEmpty)
+    }
+
+    @MainActor
     func testViewsOfSameNoteShareEditorButDifferentNotesDoNot() async {
         let model = AppModel()
         let first = model.editor(for: "sharedNote")
