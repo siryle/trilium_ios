@@ -234,7 +234,7 @@ struct NoteWebView: UIViewRepresentable {
     #note[contenteditable=true] .todo-list__label>input{pointer-events:auto}
     </style></head>
     <body><article id="note"></article><script>
-    const note=document.getElementById('note');let timer;let selection;let modified=false;let rendered='';
+    const note=document.getElementById('note');let timer;let selection;let modified=false;let rendered='';let insertingHTML=false;
     document.addEventListener('selectionchange',()=>{const s=getSelection();if(s.rangeCount&&note.contains(s.anchorNode))selection=s.getRangeAt(0).cloneRange()});
     function sanitize(html){const t=document.createElement('template');t.innerHTML=html;
       t.content.querySelectorAll('script,style,iframe,object,embed,link,meta,base,form').forEach(e=>e.remove());
@@ -261,6 +261,7 @@ struct NoteWebView: UIViewRepresentable {
       box.disabled=false;
     }
     function changed(event){
+      if(insertingHTML)return;
       modified=true;clearTimeout(timer);
       note.querySelectorAll('ul').forEach(list=>{
         if([...list.children].some(item=>[...item.children].some(e=>e.matches('label.todo-list__label'))))list.classList.add('todo-list');
@@ -276,19 +277,36 @@ struct NoteWebView: UIViewRepresentable {
     note.addEventListener('paste',e=>{e.preventDefault();document.execCommand('insertText',false,e.clipboardData.getData('text/plain'));changed()});
     function escapeHTML(text){const span=document.createElement('span');span.textContent=text;return span.innerHTML}
     function selectRange(range){const s=getSelection();s.removeAllRanges();s.addRange(range)}
+    function placeCaret(element){
+      if(!element||!note.contains(element))return;
+      const range=document.createRange();const walker=document.createTreeWalker(element,NodeFilter.SHOW_TEXT);
+      let lastText;for(let text=walker.nextNode();text;text=walker.nextNode())lastText=text;
+      // Element-end positions can resolve outside a newly inserted list in WebKit.
+      if(lastText)range.setStart(lastText,lastText.length);
+      else{range.selectNodeContents(element);range.collapse(true)}
+      range.collapse(true);selectRange(range);selection=range.cloneRange();
+    }
+    function finishEdit(restoreCaret){
+      changed();if(restoreCaret)restoreCaret();
+      selection=getSelection().rangeCount?getSelection().getRangeAt(0).cloneRange():null;
+    }
     // Native editing transactions keep custom code and checklist insertions undoable.
     function insertHTML(html,caretSelector){
       const previous=new Set(caretSelector?note.querySelectorAll(caretSelector):[]);
-      document.execCommand('insertHTML',false,html);
-      const inserted=caretSelector?[...note.querySelectorAll(caretSelector)].filter(e=>!previous.has(e)).pop():null;
-      if(inserted){const range=document.createRange();range.selectNodeContents(inserted);range.collapse(false);selectRange(range)}
-      selection=getSelection().rangeCount?getSelection().getRangeAt(0).cloneRange():null;
+      // Normalize task markup after the native edit has finished dispatching input.
+      insertingHTML=true;
+      try{document.execCommand('insertHTML',false,html)}finally{insertingHTML=false}
+      // Resolve the caret after normalization has created or moved task descriptions.
+      return caretSelector?()=>{
+        const inserted=[...note.querySelectorAll(caretSelector)].filter(e=>!previous.has(e)).pop();
+        placeCaret(inserted);
+      }:null;
     }
     function replaceBlock(block,html,caretSelector){
       // Treat the old block as atomic so native insertion cannot retain or merge its list markup.
       const editable=block.getAttribute('contenteditable');block.contentEditable='false';
       const range=document.createRange();range.selectNode(block);selectRange(range);
-      try{insertHTML(html,caretSelector)}
+      try{return insertHTML(html,caretSelector)}
       finally{
         // Undo restores this same node, which must remain editable.
         if(editable===null)block.removeAttribute('contenteditable');else block.setAttribute('contenteditable',editable);
@@ -296,8 +314,8 @@ struct NoteWebView: UIViewRepresentable {
     }
     function inlineCode(){
       const range=getSelection().getRangeAt(0);const code=elementAtCaret()?.closest('code');
-      if(code&&!code.closest('pre')&&code.contains(range.endContainer)){range.selectNode(code);selectRange(range);insertHTML(code.innerHTML);return}
-      insertHTML('<code>'+(range.collapsed?'&#8203;':escapeHTML(range.toString()))+'</code>','code');
+      if(code&&!code.closest('pre')&&code.contains(range.endContainer)){range.selectNode(code);selectRange(range);return insertHTML(code.innerHTML)}
+      return insertHTML('<code>'+(range.collapsed?'&#8203;':escapeHTML(range.toString()))+'</code>','code');
     }
     function plainTaskList(source,tag){
       const list=document.createElement(tag);list.innerHTML=source.innerHTML;
@@ -310,7 +328,7 @@ struct NoteWebView: UIViewRepresentable {
       if(existing&&note.contains(existing)){
         list.innerHTML=existing.innerHTML;
         if(existing.classList.contains('todo-list')){
-          replaceBlock(existing,plainTaskList(existing,'ul').outerHTML,'li');return;
+          return replaceBlock(existing,plainTaskList(existing,'ul').outerHTML,'li');
         }
       }else{
         const block=elementAtCaret()?.closest('p,div,h1,h2,h3,h4,h5,h6,pre');
@@ -327,45 +345,45 @@ struct NoteWebView: UIViewRepresentable {
         if(item.hasChildNodes()||!list.hasChildNodes())list.append(item);
       }
       list.className='todo-list';[...list.children].forEach(decorateTaskItem);
-      if(existing&&note.contains(existing))replaceBlock(existing,list.outerHTML,'.todo-list__label__description');
-      else insertHTML(list.outerHTML,'.todo-list__label__description');
+      if(existing&&note.contains(existing))return replaceBlock(existing,list.outerHTML,'.todo-list__label__description');
+      return insertHTML(list.outerHTML,'.todo-list__label__description');
     }
     note.addEventListener('beforeinput',event=>{
       if(event.inputType!=='insertParagraph'||event.isComposing||!note.isContentEditable)return;
       const item=elementAtCaret()?.closest('ul.todo-list>li');const text=item?.querySelector('.todo-list__label__description');
       if(!item||!text||text.textContent.trim()||item.querySelector('img,hr,ul,ol')||item!==item.parentElement.lastElementChild)return;
       event.preventDefault();const list=item.parentElement;const remaining=list.cloneNode(true);remaining.lastElementChild.remove();
-      replaceBlock(list,(remaining.children.length?remaining.outerHTML:'')+'<p><br></p>','p');changed();
+      finishEdit(replaceBlock(list,(remaining.children.length?remaining.outerHTML:'')+'<p><br></p>','p'));
     });
     note.addEventListener('click',event=>{
       if(!(event.target instanceof Element))return;
       const box=event.target.closest('.todo-list input[type=checkbox]');
       if(!note.isContentEditable)return;
       if(!box){if(event.target.closest('label.todo-list__label'))event.preventDefault();return}
+      const text=box.closest('li')?.querySelector('.todo-list__label__description');
       event.preventDefault();const replacement=box.cloneNode();replacement.toggleAttribute('checked',!box.hasAttribute('checked'));
       const range=document.createRange();range.selectNode(box);selectRange(range);
       insertHTML(replacement.outerHTML);
-      const text=elementAtCaret()?.closest('li')?.querySelector('.todo-list__label__description');
-      if(text){range.selectNodeContents(text);range.collapse(false);selectRange(range)}
-      selection=getSelection().rangeCount?getSelection().getRangeAt(0).cloneRange():null;changed();
+      finishEdit(()=>placeCaret(text));
     });
     function runCommand(name,value){
       if(!note.isContentEditable)return;
       const saved=selection;note.focus();
       if(saved&&note.contains(saved.commonAncestorContainer))selectRange(saved);
       if(!getSelection().rangeCount){const range=document.createRange();range.selectNodeContents(note);range.collapse(false);selectRange(range)}
-      if(name==='inlineCode')inlineCode();
-      else if(name==='taskList')taskList();
+      let restoreCaret;
+      if(name==='inlineCode')restoreCaret=inlineCode();
+      else if(name==='taskList')restoreCaret=taskList();
       else if(['insertUnorderedList','insertOrderedList'].includes(name)&&elementAtCaret()?.closest('ul.todo-list')){
         const list=elementAtCaret().closest('ul.todo-list');
-        replaceBlock(list,plainTaskList(list,name==='insertOrderedList'?'ol':'ul').outerHTML,'li');
+        restoreCaret=replaceBlock(list,plainTaskList(list,name==='insertOrderedList'?'ol':'ul').outerHTML,'li');
       }
       else if(name==='createLink'){
         if(typeof value!=='string'||!/^(https?:|mailto:|#|\\/)/i.test(value.trim()))return;
         if(getSelection().isCollapsed){const link=document.createElement('a');link.setAttribute('href',value);link.textContent=value;insertHTML(link.outerHTML)}
         else document.execCommand(name,false,value);
       }else document.execCommand(name,false,value);
-      selection=getSelection().rangeCount?getSelection().getRangeAt(0).cloneRange():null;changed();
+      finishEdit(restoreCaret);
     }
     </script></body></html>
     """

@@ -145,7 +145,12 @@ final class NoteRenderingTests: XCTestCase {
         _ = try await renderer.web.evaluateJavaScript("runCommand('taskList'); true")
         let count = try await renderer.web.evaluateJavaScript("note.querySelectorAll('ul.todo-list > li').length")
         XCTAssertEqual((count as? NSNumber)?.intValue, 2)
+        try await assertEditorState(
+            "note.querySelector('ul.todo-list > li:last-child .todo-list__label__description')?.contains(getSelection().anchorNode) === true",
+            in: renderer.web
+        )
         _ = try await renderer.web.evaluateJavaScript("runCommand('taskList'); true")
+        try await assertEditorState("note.querySelector('input') === null", in: renderer.web)
         let result = try await renderer.web.evaluateJavaScript("""
         ({ count: note.querySelectorAll('ul > li').length, tasks: note.querySelectorAll('input').length, bold: note.querySelector('strong')?.textContent, text: note.textContent })
         """)
@@ -169,9 +174,14 @@ final class NoteRenderingTests: XCTestCase {
         try await selectContents("#note", in: renderer.web)
 
         _ = try await renderer.web.evaluateJavaScript("runCommand('taskList'); true")
+        try await assertEditorState(
+            "note.querySelector('.todo-list__label__description')?.contains(getSelection().anchorNode) === true",
+            in: renderer.web
+        )
         _ = try await renderer.web.evaluateJavaScript("""
         note.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertParagraph', bubbles: true, cancelable: true })); true
         """)
+        try await assertEditorState("note.querySelector('ul') === null && note.querySelector('p') !== null", in: renderer.web)
         let result = try await renderer.web.evaluateJavaScript("note.querySelector('ul') === null && note.querySelector('p') !== null")
         XCTAssertEqual(result as? Bool, true)
         try await assertUndoRedo(
@@ -222,7 +232,16 @@ final class NoteRenderingTests: XCTestCase {
         try await waitForRender(renderer.bridge)
         try await selectContents("p", in: renderer.web)
 
-        _ = try await renderer.web.evaluateJavaScript("runCommand('taskList'); runCommand('insertOrderedList'); true")
+        let initialCaret = try await renderer.web.evaluateJavaScript("""
+        (() => {
+          runCommand('taskList');
+          const inside = note.querySelector('.todo-list__label__description')?.contains(getSelection().anchorNode) === true;
+          runCommand('insertOrderedList');
+          return inside;
+        })()
+        """)
+        XCTAssertEqual(initialCaret as? Bool, true, "Creating a task list must leave the caret inside its description.")
+        try await assertEditorState("note.querySelector('ol > li em')?.textContent === '待办事项' && note.querySelector('input') === null", in: renderer.web)
         let result = try await renderer.web.evaluateJavaScript("""
         ({ numbered: note.querySelector('ol > li em')?.textContent, tasks: note.querySelectorAll('input').length })
         """)
@@ -237,14 +256,48 @@ final class NoteRenderingTests: XCTestCase {
     }
 
     @MainActor
+    func testLoadedTaskListCanBecomeANumberedListAndSupportsUndoRedo() async throws {
+        let renderer = try Renderer(content: """
+        <ul class="todo-list"><li><label class="todo-list__label"><input type="checkbox" checked><span class="todo-list__label__description"><em>待办事项</em></span></label></li></ul>
+        """, editing: true)
+        defer { renderer.close() }
+        try await waitForRender(renderer.bridge)
+        try await selectContents(".todo-list__label__description", in: renderer.web)
+
+        _ = try await renderer.web.evaluateJavaScript("runCommand('insertOrderedList'); true")
+        let numbered = "note.querySelector('ol > li em')?.textContent === '待办事项' && note.querySelector('input') === null"
+        try await assertEditorState(numbered, in: renderer.web)
+        try await assertUndoRedo(
+            in: renderer.web,
+            undone: "note.querySelector('ul.todo-list input')?.checked === true && note.querySelector('em')?.textContent === '待办事项'",
+            redone: numbered
+        )
+    }
+
+    @MainActor
+    private func assertEditorState(_ condition: String, in web: WKWebView,
+                                   file: StaticString = #filePath, line: UInt = #line) async throws {
+        let result = try await web.evaluateJavaScript("""
+        (() => {
+          const current = getSelection();
+          return { matches: Boolean(\(condition)), diagnostic: JSON.stringify({
+            html: note.innerHTML, anchor: current.anchorNode?.nodeName, anchorOffset: current.anchorOffset,
+            focus: current.focusNode?.nodeName, focusOffset: current.focusOffset,
+            savedStart: selection?.startContainer.nodeName, savedOffset: selection?.startOffset
+          }) };
+        })()
+        """)
+        let values = try XCTUnwrap(result as? [String: Any], file: file, line: line)
+        XCTAssertEqual(values["matches"] as? Bool, true, values["diagnostic"] as? String ?? "Missing editor state.", file: file, line: line)
+    }
+
+    @MainActor
     private func assertUndoRedo(in web: WKWebView, undone: String, redone: String,
                                file: StaticString = #filePath, line: UInt = #line) async throws {
         _ = try await web.evaluateJavaScript("runCommand('undo'); true")
-        let undoResult = try await web.evaluateJavaScript("(\(undone)) && note.querySelector('[contenteditable]') === null")
-        XCTAssertEqual(undoResult as? Bool, true, "Undo must restore editable list content.", file: file, line: line)
+        try await assertEditorState("(\(undone)) && note.querySelector('[contenteditable]') === null", in: web, file: file, line: line)
         _ = try await web.evaluateJavaScript("runCommand('redo'); true")
-        let redoResult = try await web.evaluateJavaScript("(\(redone)) && note.querySelector('[contenteditable]') === null")
-        XCTAssertEqual(redoResult as? Bool, true, "Redo must restore the converted content.", file: file, line: line)
+        try await assertEditorState("(\(redone)) && note.querySelector('[contenteditable]') === null", in: web, file: file, line: line)
     }
 
     @MainActor
