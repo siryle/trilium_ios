@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 @MainActor
 final class NoteEditorModel: ObservableObject {
@@ -122,20 +123,29 @@ final class NoteEditorModel: ObservableObject {
 struct NoteDetailView: View {
     @EnvironmentObject private var model: AppModel
     let noteID: String
-    var body: some View { NoteDetailContent(editor: model.editor(for: noteID), noteID: noteID) }
+    var directoryID: String? = nil
+    var body: some View {
+        NoteDetailContent(editor: model.editor(for: noteID), noteID: noteID, directoryID: directoryID)
+    }
 }
 
 @MainActor
 private struct NoteDetailContent: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.dismiss) private var dismiss
     @ObservedObject var editor: NoteEditorModel
     let noteID: String
+    let directoryID: String?
     @State private var command: NoteWebView.EditorCommand?
     @StateObject private var webBridge = WebEditorBridge()
     @State private var preparingSave = false
     @State private var linkedNote: Note?
     @State private var discard = false
     @State private var showPlainText = false
+    @State private var preview = false
+    @State private var showDirectory = false
+    @FocusState private var titleFocused: Bool
+    private var busy: Bool { editor.saving || preparingSave }
     var body: some View {
         // Keep a real view mounted before metadata arrives so the loading task has a stable lifecycle.
         VStack(spacing: 0) {
@@ -149,107 +159,31 @@ private struct NoteDetailContent: View {
                     Button("重试") { Task { await load() } }
                 }
             } else if let note = editor.note {
-                VStack(spacing: 0) {
-                    if let warning = editor.draftWarning {
-                        Text(warning).font(.footnote).foregroundStyle(.secondary).padding(10).frame(maxWidth: .infinity).background(.thinMaterial)
+                if editor.editing && note.isEditable {
+                    editingView(note)
+                } else {
+                    VStack(spacing: 0) {
+                        draftWarning
+                        noteContent(note)
                     }
-                    if editor.editing {
-                        TextField("标题", text: $editor.title).font(.title2.bold()).padding()
-                            .disabled(editor.saving || preparingSave)
-                    }
-                    if note.isProtected {
-                        ContentUnavailableView("受保护笔记", systemImage: "lock", description: Text("ETAPI 无法读取受保护笔记的正文，请在 Trilium 中解锁和查看。"))
-                    } else if note.type == "image", let data = editor.imageData, let image = UIImage(data: data) {
-                        ScrollView { Image(uiImage: image).resizable().scaledToFit().padding() }
-                    } else if note.type == "file" {
-                        ContentUnavailableView("附件笔记", systemImage: "paperclip", description: Text("当前版本支持文本和图片阅读。此附件请在 Trilium 中查看。"))
-                    } else if note.type == "text", showPlainText && !editor.editing {
-                        ScrollView {
-                            Text(HTMLText.plainText(editor.content).isEmpty ? "此笔记没有可显示的文字。" : HTMLText.plainText(editor.content))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .textSelection(.enabled).padding(20)
-                        }
-                    } else if note.type == "text", (!editor.editing || !editor.sourceEditing), let api = try? model.client() {
-                        NoteHTMLContent(content: editor.content, editing: editor.editing && !editor.saving,
-                                        api: api, bridge: webBridge, command: command,
-                                        onChange: { editor.content = $0; editor.persistDraft() },
-                                        onSourceEdit: { editor.sourceEditing = true; editor.editing = true },
-                                        onNoteLink: { id in Task {
-                                            do { linkedNote = try await model.client().note(id) } catch { model.report(error) }
-                                        } })
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .layoutPriority(1)
-                    } else if editor.editing {
-                        if editor.sourceEditing {
-                            Text("HTML 源码编辑：保留此笔记的复杂结构和格式。").font(.caption).foregroundStyle(.secondary).padding(.horizontal)
-                        }
-                        TextEditor(text: $editor.content).font(.system(.body, design: .monospaced)).textInputAutocapitalization(.never).autocorrectionDisabled().padding(12).disabled(editor.saving || preparingSave)
-                    } else {
-                        ScrollView {
-                            VStack(alignment: .leading, spacing: 12) {
-                                if !note.isEditable { Text("\(note.type) · 只读内容").font(.caption).foregroundStyle(.secondary) }
-                                if note.mime.contains("markdown"), let markdown = try? AttributedString(markdown: editor.content, options: .init(interpretedSyntax: .full)) {
-                                    Text(markdown).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
-                                } else {
-                                    Text(editor.content).font(.system(.body, design: .monospaced)).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
-                                }
-                            }.padding(20)
-                        }
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .allowsHitTesting(!preparingSave)
-                .safeAreaInset(edge: .bottom) {
-                    if editor.editing && note.type == "text" && !editor.sourceEditing {
-                        NoteEditorToolbar(command: $command, formattingEnabled: webBridge.ready,
-                                          onDismissKeyboard: { webBridge.web?.endEditing(true) })
-                            .disabled(editor.saving || preparingSave)
-                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .allowsHitTesting(!preparingSave)
                 }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationTitle(editor.note?.title ?? "笔记")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar(.visible, for: .navigationBar, .tabBar)
+        .toolbar(editor.editing ? .hidden : .visible, for: .navigationBar, .tabBar)
+        .navigationBarBackButtonHidden(editor.editing)
         .toolbar {
-            if let note = editor.note, editor.failure == nil {
+            if let note = editor.note, editor.failure == nil, !editor.editing {
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     if note.isEditable {
-                        if editor.editing {
-                            Button(editor.saving ? "保存中…" : "保存") { Task { await save() } }
-                                .disabled(editor.saving || preparingSave || editor.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        } else { Button("编辑") { editor.editing = true } }
+                        Button("编辑") { editor.editing = true }
                     }
                     Menu {
-                        if note.type == "text" && !editor.editing {
-                            Button(showPlainText ? "显示排版正文" : "显示纯文字正文", systemImage: "doc.plaintext") { showPlainText.toggle() }
-                        }
-                        Button("重新加载", systemImage: "arrow.clockwise") { Task {
-                            do {
-                                let api = try model.client()
-                                await editor.reload(id: noteID, api: api, server: model.configuration.address)
-                            } catch { model.report(error) }
-                        } }.disabled(editor.dirty)
-                        if note.isEditable {
-                            Button("另存为副本", systemImage: "doc.on.doc") { Task {
-                                await saveCopy()
-                            } }
-                        }
-                        if note.isEditable && note.type == "text" {
-                            Button("编辑 HTML 源码", systemImage: "chevron.left.forwardslash.chevron.right") { editor.sourceEditing = true; editor.editing = true }
-                            if editor.sourceEditing && editor.editing {
-                                Button("切换到富文本编辑", systemImage: "textformat") { editor.sourceEditing = false }
-                                    .disabled(HTMLText.requiresSourceEditing(editor.content))
-                            }
-                        }
-                        if !note.childNoteIds.isEmpty {
-                            NavigationLink { NotebookView(noteID: note.id, title: editor.title) } label: { Label("子笔记", systemImage: "folder") }
-                        }
-                        if !note.isProtected && note.type != "file" && note.type != "image" {
-                            Button { model.contextNote = note; model.contextContent = editor.content; model.selectedTab = 3 } label: { Label("附加到 AI 对话", systemImage: "bubble.left.and.text.bubble.right") }
-                        }
-                        if editor.dirty { Button("放弃本机草稿", role: .destructive) { discard = true } }
+                        noteActions(note)
                     } label: { Image(systemName: "ellipsis.circle") }.disabled(editor.saving || preparingSave)
                 }
             }
@@ -257,6 +191,9 @@ private struct NoteDetailContent: View {
         .task { await load() }
         .onChange(of: editor.title) { _, _ in editor.persistDraft() }
         .onChange(of: editor.content) { _, _ in editor.persistDraft() }
+        .onChange(of: editor.editing) { _, _ in
+            preview = false; showDirectory = false
+        }
         .onDisappear { editor.persistDraft() }
         .navigationDestination(item: $linkedNote) { NoteDetailView(noteID: $0.id) }
         .confirmationDialog("放弃未保存的本机修改？", isPresented: $discard, titleVisibility: .visible) {
@@ -270,6 +207,166 @@ private struct NoteDetailContent: View {
             Button("保留本机草稿", role: .cancel) { }
         } message: { Text("为避免覆盖其他设备的修改，当前草稿已保留。可以保存为新副本，再对照整理。") }
     }
+
+    private func editingView(_ note: Note) -> some View {
+        NoteEditorSidebar(isPresented: showDirectory, onClose: closeDirectory) {
+            NoteEditorLayout(title: $editor.title, titleFocused: $titleFocused, command: $command,
+                             preview: preview, busy: busy, saving: editor.saving,
+                             formattingEnabled: note.type == "text" && !editor.sourceEditing && webBridge.ready,
+                             onDirectory: { Task { await openDirectory() } },
+                             onPreview: { Task { await togglePreview() } },
+                             onDismissKeyboard: hideKeyboard) {
+                Button("保存笔记", systemImage: "checkmark") { Task { await save() } }
+                    .disabled(editor.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                              || (note.type == "text" && !editor.sourceEditing && !webBridge.ready))
+                Button("收起键盘", systemImage: "keyboard.chevron.compact.down", action: hideKeyboard)
+                Button("返回目录，保留草稿", systemImage: "arrow.backward") { Task { await leave() } }
+                noteActions(note)
+            } content: {
+                VStack(spacing: 0) {
+                    draftWarning
+                    noteContent(note)
+                }
+            }
+        } directory: {
+            NoteDirectorySidebar(location: note, directoryID: directoryID, onClose: closeDirectory)
+        }
+    }
+
+    @ViewBuilder
+    private var draftWarning: some View {
+        if let warning = editor.draftWarning {
+            Text(warning).font(.footnote).foregroundStyle(.secondary)
+                .padding(10).frame(maxWidth: .infinity).background(.thinMaterial)
+        }
+    }
+
+    @ViewBuilder
+    private func noteContent(_ note: Note) -> some View {
+        let editing = editor.editing && !preview
+        if note.isProtected {
+            ContentUnavailableView("受保护笔记", systemImage: "lock", description: Text("ETAPI 无法读取受保护笔记的正文，请在 Trilium 中解锁和查看。"))
+        } else if note.type == "image", let data = editor.imageData, let image = UIImage(data: data) {
+            ScrollView { Image(uiImage: image).resizable().scaledToFit().padding() }
+        } else if note.type == "file" {
+            ContentUnavailableView("附件笔记", systemImage: "paperclip", description: Text("当前版本支持文本和图片阅读。此附件请在 Trilium 中查看。"))
+        } else if note.type == "text", showPlainText && !editor.editing {
+            ScrollView {
+                Text(HTMLText.plainText(editor.content).isEmpty ? "此笔记没有可显示的文字。" : HTMLText.plainText(editor.content))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled).padding(20)
+            }
+        } else if note.type == "text", (!editing || !editor.sourceEditing), let api = try? model.client() {
+            NoteHTMLContent(content: editor.content, editing: editing && !editor.saving,
+                            api: api, bridge: webBridge, command: command,
+                            onChange: { editor.content = $0; editor.persistDraft() },
+                            onSourceEdit: { editor.sourceEditing = true; editor.editing = true; preview = false },
+                            onNoteLink: { id in Task {
+                                do { linkedNote = try await model.client().note(id) } catch { model.report(error) }
+                            } })
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .layoutPriority(1)
+        } else if editing {
+            if editor.sourceEditing {
+                Text("HTML 源码编辑：保留此笔记的复杂结构和格式。").font(.caption).foregroundStyle(.secondary).padding(.horizontal)
+            }
+            TextEditor(text: $editor.content)
+                .font(.system(.body, design: .monospaced))
+                .textInputAutocapitalization(.never).autocorrectionDisabled()
+                .scrollContentBackground(.hidden).padding(.horizontal, 16).disabled(busy)
+        } else {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    if !note.isEditable { Text("\(note.type) · 只读内容").font(.caption).foregroundStyle(.secondary) }
+                    if note.mime.contains("markdown"), let markdown = try? AttributedString(markdown: editor.content, options: .init(interpretedSyntax: .full)) {
+                        Text(markdown).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+                    } else {
+                        Text(editor.content).font(.system(.body, design: .monospaced)).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+                    }
+                }.padding(20)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func noteActions(_ note: Note) -> some View {
+        if note.type == "text" && !editor.editing {
+            Button(showPlainText ? "显示排版正文" : "显示纯文字正文", systemImage: "doc.plaintext") { showPlainText.toggle() }
+        }
+        Button("重新加载", systemImage: "arrow.clockwise") { Task {
+            do {
+                let api = try model.client()
+                await editor.reload(id: noteID, api: api, server: model.configuration.address)
+            } catch { model.report(error) }
+        } }.disabled(editor.dirty)
+        if note.isEditable {
+            Button("另存为副本", systemImage: "doc.on.doc") { Task {
+                await saveCopy()
+            } }
+        }
+        if note.isEditable && note.type == "text" {
+            Button("编辑 HTML 源码", systemImage: "chevron.left.forwardslash.chevron.right") {
+                Task { await setSourceEditing(true) }
+            }
+            if editor.sourceEditing && editor.editing {
+                Button("切换到富文本编辑", systemImage: "textformat") {
+                    Task { await setSourceEditing(false) }
+                }.disabled(HTMLText.requiresSourceEditing(editor.content))
+            }
+        }
+        if !note.childNoteIds.isEmpty {
+            NavigationLink { NotebookView(noteID: note.id, title: editor.title) } label: { Label("子笔记", systemImage: "folder") }
+        }
+        if !note.isProtected && note.type != "file" && note.type != "image" {
+            Button { model.contextNote = note; model.contextContent = editor.content; model.selectedTab = 3 } label: { Label("附加到 AI 对话", systemImage: "bubble.left.and.text.bubble.right") }
+        }
+        if editor.dirty { Button("放弃本机草稿", role: .destructive) { discard = true } }
+    }
+
+    private func hideKeyboard() {
+        titleFocused = false
+        webBridge.web?.endEditing(true)
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    }
+    private func openDirectory() async {
+        guard !busy else { return }
+        preparingSave = true; defer { preparingSave = false }
+        do {
+            try await flushEditor()
+            editor.persistDraft()
+            withAnimation(.easeInOut(duration: 0.25)) { showDirectory = true }
+        } catch { model.report(error) }
+    }
+    private func closeDirectory() {
+        withAnimation(.easeInOut(duration: 0.25)) { showDirectory = false }
+    }
+    private func togglePreview() async {
+        guard !busy else { return }
+        preparingSave = true; defer { preparingSave = false }
+        do {
+            try await flushEditor()
+            editor.persistDraft()
+            preview.toggle()
+        } catch { model.report(error) }
+    }
+    private func leave() async {
+        guard !busy else { return }
+        preparingSave = true; defer { preparingSave = false }
+        do {
+            try await flushEditor()
+            editor.persistDraft()
+            dismiss()
+        } catch { model.report(error) }
+    }
+    private func setSourceEditing(_ value: Bool) async {
+        guard !busy else { return }
+        preparingSave = true; defer { preparingSave = false }
+        do {
+            try await flushEditor()
+            editor.sourceEditing = value; editor.editing = true; preview = false
+        } catch { model.report(error) }
+    }
+
     private func load() async {
         do {
             let api = try model.client()
@@ -280,7 +377,8 @@ private struct NoteDetailContent: View {
         }
     }
     private func flushEditor() async throws {
-        if editor.editing && !editor.sourceEditing && editor.note?.type == "text" {
+        titleFocused = false
+        if editor.editing && !preview && !editor.sourceEditing && editor.note?.type == "text" {
             let beforeFlush = editor.content
             if let latest = try await webBridge.flush() {
                 guard editor.content == beforeFlush || editor.content == latest else {
@@ -289,6 +387,7 @@ private struct NoteDetailContent: View {
                 editor.content = latest; editor.persistDraft()
             }
         }
+        hideKeyboard()
     }
     private func save() async {
         guard !preparingSave, !editor.saving else { return }

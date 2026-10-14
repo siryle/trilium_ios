@@ -77,7 +77,67 @@ final class NoteDetailPresentationTests: XCTestCase {
     }
 
     @MainActor
-    private func waitForBody(in host: DetailHost, expected: String) async throws -> WKWebView {
+    func testSharedEditingLayoutReceivesLiveChangesAndReturnsToReading() async throws {
+        let fixture = try PresentationFixture()
+        defer { fixture.close() }
+        let model = AppModel(client: fixture.api)
+        let editor = model.editor(for: "renderNote")
+        defer { editor.discardDraft() }
+        let host = DetailHost(model: model)
+        defer { host.close() }
+        _ = try await waitForBody(in: host, expected: "首次打开：你好 & hello")
+
+        editor.editing = true
+        let web = try await waitForBody(in: host, expected: "首次打开：你好 & hello", editing: true)
+        _ = try await web.evaluateJavaScript("""
+        const article = document.getElementById('note');
+        article.innerHTML = '<p><strong>编辑后的正文</strong></p>';
+        article.dispatchEvent(new Event('input', { bubbles: true }));
+        """)
+        try await waitUntil("Live edits should reach the shared note model") {
+            editor.content == "<p><strong>编辑后的正文</strong></p>"
+        }
+        editor.title = "编辑后的标题"
+        editor.editing = false
+        _ = try await waitForBody(in: host, expected: "编辑后的正文")
+
+        XCTAssertEqual(editor.title, "编辑后的标题")
+        XCTAssertTrue(editor.dirty)
+        let name = LocalStore.scopedName("note", server: model.configuration.address, noteID: "renderNote")
+        let draft = try XCTUnwrap(LocalStore().load(name, as: NoteDraft.self))
+        XCTAssertEqual(draft.title, editor.title)
+        XCTAssertEqual(draft.content, editor.content)
+        XCTAssertEqual(fixture.requests.count, 2, "Switching layouts must not refetch or save the note.")
+    }
+
+    @MainActor
+    func testRestoredDirectoryDraftOpensInTheSharedEditingLayout() async throws {
+        let fixture = try PresentationFixture()
+        defer { fixture.close() }
+        let model = AppModel(client: fixture.api)
+        let editor = model.editor(for: "renderNote")
+        await editor.load(id: "renderNote", api: fixture.api, server: model.configuration.address)
+        defer { editor.discardDraft() }
+        editor.title = "未保存的标题"
+        editor.content = "<p><em>恢复的富文本草稿</em></p>"
+        editor.persistDraft()
+
+        let reopenedModel = AppModel(client: fixture.api)
+        let restoredEditor = reopenedModel.editor(for: "renderNote")
+        defer { restoredEditor.discardDraft() }
+        let host = DetailHost(model: reopenedModel)
+        defer { host.close() }
+        _ = try await waitForBody(in: host, expected: "恢复的富文本草稿", editing: true)
+
+        XCTAssertEqual(restoredEditor.title, "未保存的标题")
+        XCTAssertEqual(restoredEditor.content, editor.content)
+        XCTAssertTrue(restoredEditor.editing)
+        XCTAssertTrue(restoredEditor.dirty)
+        XCTAssertNotNil(restoredEditor.draftWarning)
+    }
+
+    @MainActor
+    private func waitForBody(in host: DetailHost, expected: String, editing: Bool = false) async throws -> WKWebView {
         // Hosted runners can spend nearly 20 seconds starting WebKit before the document loads.
         let deadline = ContinuousClock.now.advanced(by: .seconds(60))
         var lastJavaScriptError: String?
@@ -87,7 +147,10 @@ final class NoteDetailPresentationTests: XCTestCase {
             if let web = findWebView(in: host.controller.view), web.bounds.width > 0, web.bounds.height > 0 {
                 do {
                     let value = try await web.evaluateJavaScript("document.getElementById('note')?.textContent")
-                    if value as? String == expected { return web }
+                    if value as? String == expected {
+                        let editable = try await web.evaluateJavaScript("document.getElementById('note').isContentEditable")
+                        if editable as? Bool == editing { return web }
+                    }
                 } catch { lastJavaScriptError = error.localizedDescription }
             }
             try await Task.sleep(for: .milliseconds(100))

@@ -66,6 +66,96 @@ struct NoteHTMLContent: View {
 }
 
 @MainActor
+struct NoteEditorLayout<Actions: View, Content: View>: View {
+    @Binding var title: String
+    @FocusState.Binding var titleFocused: Bool
+    @Binding var command: NoteWebView.EditorCommand?
+    let preview: Bool
+    let busy: Bool
+    let saving: Bool
+    let formattingEnabled: Bool
+    let onDirectory: () -> Void
+    let onPreview: () -> Void
+    let onDismissKeyboard: () -> Void
+    @ViewBuilder let actions: () -> Actions
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Button(action: onDirectory) {
+                    Image(systemName: "sidebar.left").frame(width: 44, height: 44)
+                }
+                .background(Color(.systemBackground), in: Circle())
+                .shadow(color: .black.opacity(0.06), radius: 12, y: 4)
+                .accessibilityLabel("打开笔记目录")
+                Spacer()
+                if saving { ProgressView().padding(.trailing, 12) }
+                HStack(spacing: 0) {
+                    Button(action: onPreview) {
+                        Image(systemName: preview ? "square.and.pencil" : "book")
+                            .frame(width: 48, height: 44)
+                    }.accessibilityLabel(preview ? "继续编辑" : "阅读预览")
+                    Menu(content: actions) {
+                        Image(systemName: "ellipsis").frame(width: 44, height: 44)
+                    }.accessibilityLabel("更多操作")
+                }
+                .padding(.horizontal, 4)
+                .background(Color(.systemBackground), in: Capsule())
+                .shadow(color: .black.opacity(0.06), radius: 12, y: 4)
+            }
+            .font(.system(size: 22)).foregroundStyle(.primary).disabled(busy)
+            .padding(.horizontal, 12).padding(.top, 8)
+            TextField("笔记标题", text: $title, prompt: Text("未命名").foregroundColor(.primary), axis: .vertical)
+                .font(.largeTitle.bold())
+                .focused($titleFocused).disabled(preview || busy)
+                .padding(.horizontal, 24).padding(.top, 28).padding(.bottom, 8)
+                .accessibilityLabel("笔记标题")
+            content()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .allowsHitTesting(!busy)
+        }
+        .background(Color(.systemBackground))
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if !preview {
+                NoteEditorToolbar(command: $command, formattingEnabled: formattingEnabled,
+                                  onDismissKeyboard: onDismissKeyboard)
+                    .disabled(busy)
+            }
+        }
+    }
+}
+
+@MainActor
+struct NoteEditorSidebar<Content: View, Directory: View>: View {
+    let isPresented: Bool
+    let onClose: () -> Void
+    @ViewBuilder let content: () -> Content
+    @ViewBuilder let directory: () -> Directory
+
+    var body: some View {
+        GeometryReader { geometry in
+            let width = min(geometry.size.width * 0.84, 380)
+            ZStack(alignment: .leading) {
+                content()
+                    .offset(x: isPresented ? width : 0)
+                    .allowsHitTesting(!isPresented)
+                    .accessibilityHidden(isPresented)
+                if isPresented {
+                    Color.black.opacity(0.12).ignoresSafeArea()
+                        .onTapGesture(perform: onClose)
+                        .accessibilityHidden(true)
+                    directory()
+                        .frame(width: width)
+                        .transition(.move(edge: .leading))
+                        .shadow(color: .black.opacity(0.08), radius: 12, x: 4)
+                }
+            }
+        }
+    }
+}
+
+@MainActor
 struct NoteEditorToolbar: View {
     @Binding var command: NoteWebView.EditorCommand?
     var formattingEnabled = true
@@ -111,5 +201,74 @@ struct NoteEditorToolbar: View {
     }
     private func run(_ name: String, value: String? = nil) {
         command = NoteWebView.EditorCommand(name: name, value: value)
+    }
+}
+
+@MainActor
+struct NoteDirectorySidebar: View {
+    @EnvironmentObject private var model: AppModel
+    var location: Note? = nil
+    var directoryID: String? = nil
+    var draftTitle: String? = nil
+    let onClose: () -> Void
+    @State private var directory: Note?
+    @State private var failure: String?
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if let directory {
+                    NotebookView(noteID: directory.id, title: "笔记目录", highlightedNoteID: location?.id ?? directory.id,
+                                 draftTitle: draftTitle.map { $0.isEmpty ? "未命名" : $0 },
+                                 onResumeDraft: onClose, onHighlightedNote: onClose)
+                        .safeAreaInset(edge: .bottom) {
+                            NavigationLink {
+                                NotebookView(noteID: "root", title: "文件列表")
+                            } label: {
+                                Label("文件列表", systemImage: "folder")
+                                    .font(.headline).frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(16)
+                                    .background(Color(.systemGray6), in: Capsule())
+                            }.padding(16).background(Color(.systemBackground))
+                        }
+                } else if let failure {
+                    ContentUnavailableView {
+                        Label("无法加载目录", systemImage: "folder.badge.questionmark")
+                    } description: { Text(failure) } actions: {
+                        Button("重试") { Task { await load() } }
+                    }
+                } else {
+                    ProgressView("定位笔记目录…").frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .navigationTitle("笔记目录").navigationBarTitleDisplayMode(.inline)
+            .toolbar(.visible, for: .navigationBar)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(action: onClose) { Image(systemName: "sidebar.left") }
+                        .accessibilityLabel("收起目录，继续编辑")
+                }
+            }
+        }
+        .background(Color(.systemBackground).ignoresSafeArea())
+        .task { await load() }
+    }
+
+    private func load() async {
+        failure = nil
+        do {
+            let api = try model.client()
+            let result: Note
+            if let location {
+                result = try await api.note(directoryID ?? location.parentNoteIds.first ?? "root")
+            } else {
+                result = try await api.dayNote()
+            }
+            try Task.checkCancellation()
+            directory = result
+        } catch {
+            if error is CancellationError || (error as? URLError)?.code == .cancelled { return }
+            failure = error.localizedDescription
+        }
     }
 }

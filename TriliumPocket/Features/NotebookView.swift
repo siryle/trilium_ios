@@ -8,6 +8,7 @@ struct NotebookView: View {
     var highlightedNoteID: String? = nil
     var draftTitle: String? = nil
     var onResumeDraft: (() -> Void)? = nil
+    var onHighlightedNote: (() -> Void)? = nil
     @State private var entries: [TreeEntry] = []
     @State private var parent: Note?
     @State private var loading = false
@@ -17,53 +18,65 @@ struct NotebookView: View {
         Group {
             if !model.isConfigured { ConnectionPlaceholder() }
             else {
-                List {
-                    if let parent, picking != nil {
-                        Button { picking?(parent) } label: { Label("选择此目录", systemImage: "checkmark.circle") }
-                    } else if let parent, noteID != "root" {
-                        NavigationLink { NoteDetailView(noteID: parent.id) } label: {
-                            Label(parent.id == highlightedNoteID ? parent.title : "查看本笔记", systemImage: "doc.text.magnifyingglass")
-                        }
-                        .listRowBackground(parent.id == highlightedNoteID ? Color(.systemGray5) : nil)
-                    }
-                    if let draftTitle, let onResumeDraft {
-                        Button(action: onResumeDraft) {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(draftTitle).foregroundStyle(.primary)
-                                Text("本机草稿").font(.caption).foregroundStyle(.secondary)
-                            }.padding(.vertical, 6)
-                        }
-                    }
-                    ForEach(entries) { entry in
-                        HStack {
-                            if let picking {
-                                Button { picking(entry.note) } label: { NoteRow(note: entry.note, title: entry.title) }
-                                    .buttonStyle(.plain)
-                            } else {
-                                NavigationLink { NoteDetailView(noteID: entry.note.id) } label: { NoteRow(note: entry.note, title: entry.title) }
+                ScrollViewReader { proxy in
+                    List {
+                        if let parent, picking != nil {
+                            Button { picking?(parent) } label: { Label("选择此目录", systemImage: "checkmark.circle") }
+                        } else if let parent, noteID != "root" {
+                            NavigationLink { NoteDetailView(noteID: parent.id) } label: {
+                                Label(parent.id == highlightedNoteID ? parent.title : "查看本笔记", systemImage: "doc.text.magnifyingglass")
                             }
-                            if !entry.note.childNoteIds.isEmpty || picking != nil {
-                                NavigationLink {
-                                    NotebookView(noteID: entry.note.id, title: entry.title, picking: picking)
-                                } label: {
-                                    Image(systemName: "folder").padding(12).accessibilityLabel("打开 \(entry.title) 的子目录")
-                                }.buttonStyle(.borderless).fixedSize()
+                            .listRowBackground(parent.id == highlightedNoteID ? Color(.systemGray5) : nil)
+                        }
+                        if let draftTitle, let onResumeDraft {
+                            Button(action: onResumeDraft) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(draftTitle).foregroundStyle(.primary)
+                                    Text("本机草稿").font(.caption).foregroundStyle(.secondary)
+                                }.padding(.vertical, 6)
                             }
                         }
+                        ForEach(entries) { entry in
+                            HStack {
+                                if let picking {
+                                    Button { picking(entry.note) } label: { NoteRow(note: entry.note, title: entry.title) }
+                                        .buttonStyle(.plain)
+                                } else if entry.note.id == highlightedNoteID, let onHighlightedNote {
+                                    Button(action: onHighlightedNote) { NoteRow(note: entry.note, title: entry.title) }
+                                        .buttonStyle(.plain)
+                                } else {
+                                    NavigationLink { NoteDetailView(noteID: entry.note.id, directoryID: noteID) } label: { NoteRow(note: entry.note, title: entry.title) }
+                                }
+                                if !entry.note.childNoteIds.isEmpty || picking != nil {
+                                    NavigationLink {
+                                        NotebookView(noteID: entry.note.id, title: entry.title, picking: picking)
+                                    } label: {
+                                        Image(systemName: "folder").padding(12).accessibilityLabel("打开 \(entry.title) 的子目录")
+                                    }.buttonStyle(.borderless).fixedSize()
+                                }
+                            }
+                            .id(entry.id)
+                            .listRowBackground(entry.note.id == highlightedNoteID ? Color(.systemGray5) : nil)
+                        }
+                        if let failure {
+                            Text(failure).foregroundStyle(.secondary)
+                            Button("重试") { Task { await load() } }
+                        }
                     }
-                    if let failure {
-                        Text(failure).foregroundStyle(.secondary)
-                        Button("重试") { Task { await load() } }
+                    .overlay {
+                        if loading && entries.isEmpty { ProgressView("加载目录…") }
+                        else if entries.isEmpty && failure == nil && parent != nil && picking == nil && draftTitle == nil {
+                            ContentUnavailableView("暂无子笔记", systemImage: "folder", description: Text("点击右上角 + 在此目录创建笔记。"))
+                                .allowsHitTesting(false)
+                        }
+                    }
+                    .refreshable { await load() }
+                    .onChange(of: entries.map(\.id)) { _, _ in
+                        if let entry = entries.first(where: { $0.note.id == highlightedNoteID }) {
+                            proxy.scrollTo(entry.id, anchor: .center)
+                        }
                     }
                 }
-                .overlay {
-                    if loading && entries.isEmpty { ProgressView("加载目录…") }
-                    else if entries.isEmpty && failure == nil && parent != nil && picking == nil && draftTitle == nil {
-                        ContentUnavailableView("暂无子笔记", systemImage: "folder", description: Text("点击右上角 + 在此目录创建笔记。"))
-                            .allowsHitTesting(false)
-                    }
-                }
-                .refreshable { await load() }
             }
         }
         .navigationTitle(title)
