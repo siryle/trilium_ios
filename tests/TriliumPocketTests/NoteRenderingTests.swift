@@ -118,6 +118,11 @@ final class NoteRenderingTests: XCTestCase {
         let formatting = try await renderer.web.evaluateJavaScript("note.querySelector('.todo-list__label__description strong')?.textContent")
         XCTAssertEqual(formatting as? String, "待办事项")
         _ = try await renderer.web.evaluateJavaScript("note.querySelector('.todo-list input').click(); true")
+        try await assertUndoRedo(
+            in: renderer.web,
+            undone: "note.querySelector('.todo-list input')?.checked === false",
+            redone: "note.querySelector('.todo-list input')?.checked === true"
+        )
         let exported = try await renderer.bridge.flush()
         let content = try XCTUnwrap(exported)
         XCTAssertFalse(HTMLText.requiresSourceEditing(content))
@@ -272,6 +277,107 @@ final class NoteRenderingTests: XCTestCase {
             undone: "note.querySelector('ul.todo-list input')?.checked === true && note.querySelector('em')?.textContent === '待办事项'",
             redone: numbered
         )
+    }
+
+    @MainActor
+    func testNativeFormattingTextAndStructuralEditsShareOneUndoHistory() async throws {
+        let renderer = try Renderer(content: "<p>中文任务</p>", editing: true)
+        defer { renderer.close() }
+        try await waitForRender(renderer.bridge)
+        try await selectContents("p", in: renderer.web)
+
+        let initial = try await renderer.web.evaluateJavaScript("note.innerHTML") as? String
+        var snapshots = [try XCTUnwrap(initial)]
+        for command in ["runCommand('bold')", "runCommand('taskList')",
+                        "runCommand('insertOrderedList')", "runCommand('insertText', '追加')"] {
+            _ = try await renderer.web.evaluateJavaScript("\(command); true")
+            let snapshot = try await renderer.web.evaluateJavaScript("note.innerHTML") as? String
+            snapshots.append(try XCTUnwrap(snapshot))
+        }
+        try await assertEditorState(
+            "note.querySelector('ol li')?.textContent === '中文任务追加' && note.querySelector('b, strong') !== null && note.querySelector('input') === null",
+            in: renderer.web
+        )
+        for expected in snapshots.dropLast().reversed() {
+            _ = try await renderer.web.evaluateJavaScript("runCommand('undo'); true")
+            let actual = try await renderer.web.evaluateJavaScript("note.innerHTML") as? String
+            XCTAssertEqual(actual, expected)
+        }
+        for expected in snapshots.dropFirst() {
+            _ = try await renderer.web.evaluateJavaScript("runCommand('redo'); true")
+            let actual = try await renderer.web.evaluateJavaScript("note.innerHTML") as? String
+            XCTAssertEqual(actual, expected)
+        }
+    }
+
+    @MainActor
+    func testHistoryInputAndKeyboardShortcutsRestoreListsAndCaret() async throws {
+        let renderer = try Renderer(content: """
+        <ul class="todo-list"><li><label class="todo-list__label"><input type="checkbox" checked><span class="todo-list__label__description"><em>待办事项</em></span></label></li></ul>
+        """, editing: true)
+        defer { renderer.close() }
+        try await waitForRender(renderer.bridge)
+        try await selectContents(".todo-list__label__description", in: renderer.web)
+        _ = try await renderer.web.evaluateJavaScript("runCommand('insertOrderedList'); true")
+
+        let taskState = "note.querySelector('ul.todo-list input')?.checked === true && note.querySelector('.todo-list__label__description')?.contains(getSelection().anchorNode) === true"
+        let numberedState = "note.querySelector('ol li em')?.textContent === '待办事项' && note.querySelector('input') === null && note.querySelector('ol li')?.contains(getSelection().anchorNode) === true"
+        for (type, expected) in [("historyUndo", taskState), ("historyRedo", numberedState)] {
+            let canceled = try await renderer.web.evaluateJavaScript("""
+            !note.dispatchEvent(new InputEvent('beforeinput', { inputType: '\(type)', bubbles: true, cancelable: true }))
+            """)
+            XCTAssertEqual(canceled as? Bool, true)
+            try await assertEditorState(expected, in: renderer.web)
+        }
+        for (shift, expected) in [(false, taskState), (true, numberedState)] {
+            let canceled = try await renderer.web.evaluateJavaScript("""
+            !note.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', metaKey: true, shiftKey: \(shift), bubbles: true, cancelable: true }))
+            """)
+            XCTAssertEqual(canceled as? Bool, true)
+            try await assertEditorState(expected, in: renderer.web)
+        }
+
+        // Starting another document discards both directions of the previous history.
+        let encoded = Data("<p>另一篇笔记</p>".utf8).base64EncodedString()
+        _ = try await renderer.web.evaluateJavaScript("setNote('\(encoded)', true); runCommand('undo'); runCommand('redo'); true")
+        try await assertEditorState("note.innerHTML === '<p>另一篇笔记</p>'", in: renderer.web)
+    }
+
+    @MainActor
+    func testTextInputAndChineseCompositionRemainUndoableAfterListReplacement() async throws {
+        let renderer = try Renderer(content: "<p>起点</p>", editing: true)
+        defer { renderer.close() }
+        try await waitForRender(renderer.bridge)
+        try await selectContents("p", in: renderer.web)
+        _ = try await renderer.web.evaluateJavaScript("runCommand('taskList'); runCommand('insertOrderedList'); true")
+        let before = try await renderer.web.evaluateJavaScript("note.innerHTML") as? String
+
+        // Exercise the input listener directly, outside the toolbar's native-command wrapper.
+        _ = try await renderer.web.evaluateJavaScript("""
+        note.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', bubbles: true, cancelable: true }));
+        document.execCommand('insertText', false, '!'); true
+        """)
+        let typed = try await renderer.web.evaluateJavaScript("note.innerHTML") as? String
+        XCTAssertNotEqual(typed, before)
+        try await assertEditorState("note.textContent === '起点!'", in: renderer.web)
+        _ = try await renderer.web.evaluateJavaScript("""
+        note.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+        for (const text of ['中', '中文']) {
+          const item = note.querySelector('li');
+          item.textContent = '起点!' + text;
+          placeCaret(item);
+          note.dispatchEvent(new InputEvent('input', { inputType: 'insertCompositionText', isComposing: true, bubbles: true }));
+        }
+        note.dispatchEvent(new CompositionEvent('compositionend', { data: '中文', bubbles: true })); true
+        """)
+        try await assertUndoRedo(in: renderer.web,
+                                undone: "note.textContent === '起点!'",
+                                redone: "note.textContent === '起点!中文'")
+        _ = try await renderer.web.evaluateJavaScript("runCommand('undo'); runCommand('undo'); true")
+        let undone = try await renderer.web.evaluateJavaScript("note.innerHTML") as? String
+        XCTAssertEqual(undone, before)
+        _ = try await renderer.web.evaluateJavaScript("runCommand('insertText', '新分支'); runCommand('redo'); true")
+        try await assertEditorState("note.textContent === '起点新分支'", in: renderer.web)
     }
 
     @MainActor

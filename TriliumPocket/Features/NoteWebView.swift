@@ -234,7 +234,42 @@ struct NoteWebView: UIViewRepresentable {
     #note[contenteditable=true] .todo-list__label>input{pointer-events:auto}
     </style></head>
     <body><article id="note"></article><script>
-    const note=document.getElementById('note');let timer;let selection;let modified=false;let rendered='';let insertingHTML=false;
+    // One history for native edits and DOM replacements; store only the changed HTML and caret paths.
+    class EditorHistory {
+      constructor(maxEntries=100,maxCharacters=4000000){this.maxEntries=maxEntries;this.maxCharacters=maxCharacters;this.reset('')}
+      reset(html){this.html=html;this.bookmark=null;this.entries=[];this.index=0;this.characters=0;this.canMerge=false}
+      capture(bookmark){this.bookmark=bookmark}
+      apply(entry,forward){
+        const removed=forward?entry.removed:entry.inserted;const inserted=forward?entry.inserted:entry.removed;
+        return this.html.slice(0,entry.start)+inserted+this.html.slice(entry.start+removed.length);
+      }
+      record(html,bookmark,group=null,time=Date.now()){
+        if(html===this.html){this.bookmark=bookmark;if(!group)this.canMerge=false;return}
+        for(const entry of this.entries.splice(this.index))this.characters-=entry.removed.length+entry.inserted.length;
+        const last=this.entries.at(-1);
+        if(this.canMerge&&group&&last?.group===group&&time-last.time<1000&&JSON.stringify(this.bookmark)===JSON.stringify(last.after)){
+          this.html=this.apply(last,false);this.bookmark=last.before;
+          this.entries.pop();this.index--;this.characters-=last.removed.length+last.inserted.length;
+        }
+        let start=0;let end=0;
+        while(start<this.html.length&&start<html.length&&this.html[start]===html[start])start++;
+        while(end<this.html.length-start&&end<html.length-start&&this.html[this.html.length-1-end]===html[html.length-1-end])end++;
+        const entry={start,removed:this.html.slice(start,this.html.length-end),inserted:html.slice(start,html.length-end),before:this.bookmark,after:bookmark,group,time};
+        this.entries.push(entry);this.index++;this.characters+=entry.removed.length+entry.inserted.length;
+        this.html=html;this.bookmark=bookmark;this.canMerge=true;
+        while(this.entries.length>1&&(this.entries.length>this.maxEntries||this.characters>this.maxCharacters)){
+          const removed=this.entries.shift();this.index--;this.characters-=removed.removed.length+removed.inserted.length;
+        }
+      }
+      move(direction){
+        const entry=this.entries[direction<0?this.index-1:this.index];if(!entry)return null;
+        this.html=this.apply(entry,direction>0);this.bookmark=direction<0?entry.before:entry.after;
+        this.index+=direction;this.canMerge=false;
+        return {html:this.html,bookmark:this.bookmark};
+      }
+    }
+    const editorHistory=new EditorHistory();
+    const note=document.getElementById('note');let timer;let selection;let modified=false;let rendered='';let executingCommand=false;let composing=false;
     document.addEventListener('selectionchange',()=>{const s=getSelection();if(s.rangeCount&&note.contains(s.anchorNode))selection=s.getRangeAt(0).cloneRange()});
     function sanitize(html){const t=document.createElement('template');t.innerHTML=html;
       t.content.querySelectorAll('script,style,iframe,object,embed,link,meta,base,form').forEach(e=>e.remove());
@@ -242,7 +277,7 @@ struct NoteWebView: UIViewRepresentable {
         if(e.hasAttribute('href')){const h=e.getAttribute('href').trim();if(!/^(https?:|mailto:|#|\\/)/i.test(h))e.removeAttribute('href')}
         if(e.tagName==='IMG'){const src=e.getAttribute('src')||'';e.setAttribute('data-trilium-original-src',src);e.setAttribute('data-trilium-original-alt',JSON.stringify(e.getAttribute('alt')));const match=src.match(/(?:^|\\/)api\\/(images|attachments)\\/([^/]+)\\//);if(match){e.src='trilium-resource://local/'+(match[1]==='images'?'notes':'attachments')+'/'+encodeURIComponent(match[2])+'/content'}else if(!/^data:image\\/(png|jpeg|gif|webp);base64,/i.test(src)){e.removeAttribute('src');e.alt=e.alt||'外部图片未加载'}}
       });return t.innerHTML}
-    function setNote(encoded,editing){clearTimeout(timer);note.innerHTML=sanitize(new TextDecoder().decode(Uint8Array.from(atob(encoded),c=>c.charCodeAt(0))));note.contentEditable=editing?'true':'false';note.querySelectorAll('.todo-list input[type=checkbox]').forEach(e=>e.disabled=!editing);selection=null;modified=false;rendered=note.innerHTML;}
+    function setNote(encoded,editing){clearTimeout(timer);note.innerHTML=sanitize(new TextDecoder().decode(Uint8Array.from(atob(encoded),c=>c.charCodeAt(0))));note.contentEditable=editing?'true':'false';note.querySelectorAll('.todo-list input[type=checkbox]').forEach(e=>e.disabled=!editing);selection=null;modified=false;composing=false;rendered=note.innerHTML;editorHistory.reset(rendered);}
     function exportHTML(){const t=note.cloneNode(true);t.querySelectorAll('img').forEach(e=>{const src=e.getAttribute('data-trilium-original-src');if(src!==null)e.setAttribute('src',src);const alt=e.getAttribute('data-trilium-original-alt');if(alt!==null){const original=JSON.parse(alt);if(original===null)e.removeAttribute('alt');else e.setAttribute('alt',original)}e.removeAttribute('data-trilium-original-src');e.removeAttribute('data-trilium-original-alt')});t.querySelectorAll('.todo-list input[type=checkbox]').forEach(e=>e.setAttribute('disabled','disabled'));return t.innerHTML;}
     function flushNote(){note.blur();return modified||note.innerHTML!==rendered?exportHTML():null}
     function elementAtCaret(){const node=getSelection()?.anchorNode;return node?.nodeType===Node.ELEMENT_NODE?node:node?.parentElement}
@@ -260,9 +295,12 @@ struct NoteWebView: UIViewRepresentable {
       if(!box){box=document.createElement('input');box.type='checkbox';label.prepend(box)}
       box.disabled=false;
     }
-    function changed(event){
-      if(insertingHTML)return;
+    function publishEdit(){
       modified=true;clearTimeout(timer);
+      window.webkit.messageHandlers.edited.postMessage(exportHTML());
+    }
+    function changed(event,restoreCaret){
+      if(executingCommand)return;
       note.querySelectorAll('ul').forEach(list=>{
         if([...list.children].some(item=>[...item.children].some(e=>e.matches('label.todo-list__label'))))list.classList.add('todo-list');
       });
@@ -271,12 +309,37 @@ struct NoteWebView: UIViewRepresentable {
         const item=elementAtCaret()?.closest('ul.todo-list>li');const box=item?.querySelector('input[type=checkbox]');if(box)box.checked=false;
       }
       note.querySelectorAll('.todo-list input[type=checkbox]').forEach(e=>e.toggleAttribute('checked',e.checked));
-      window.webkit.messageHandlers.edited.postMessage(exportHTML());
+      if(restoreCaret)restoreCaret();
+      selection=getSelection().rangeCount?getSelection().getRangeAt(0).cloneRange():null;
+      const group=['insertText','deleteContentBackward','deleteContentForward'].includes(event?.inputType)?event.inputType:null;
+      if(!composing)editorHistory.record(note.innerHTML,bookmarkSelection(),group);
+      publishEdit();
     }
     note.addEventListener('input',changed);note.addEventListener('blur',()=>{clearTimeout(timer);if(note.isContentEditable&&modified)window.webkit.messageHandlers.edited.postMessage(exportHTML())});
-    note.addEventListener('paste',e=>{e.preventDefault();document.execCommand('insertText',false,e.clipboardData.getData('text/plain'));changed()});
+    note.addEventListener('paste',e=>{e.preventDefault();editorHistory.capture(bookmarkSelection());nativeCommand('insertText',e.clipboardData.getData('text/plain'));finishEdit()});
+    note.addEventListener('compositionstart',()=>{editorHistory.capture(bookmarkSelection());composing=true});
+    note.addEventListener('compositionend',()=>{composing=false;changed()});
     function escapeHTML(text){const span=document.createElement('span');span.textContent=text;return span.innerHTML}
     function selectRange(range){const s=getSelection();s.removeAllRanges();s.addRange(range)}
+    function bookmarkSelection(){
+      const current=getSelection();
+      if(!current.rangeCount||!note.contains(current.anchorNode)||!note.contains(current.focusNode))return null;
+      const path=node=>{const result=[];while(node!==note){const parent=node.parentNode;result.unshift([...parent.childNodes].indexOf(node));node=parent}return result};
+      return {anchor:path(current.anchorNode),anchorOffset:current.anchorOffset,focus:path(current.focusNode),focusOffset:current.focusOffset};
+    }
+    function restoreSelection(bookmark){
+      const resolve=path=>path.reduce((node,index)=>node?.childNodes[index],note);
+      const anchor=bookmark&&resolve(bookmark.anchor);const focus=bookmark&&resolve(bookmark.focus);
+      if(anchor&&focus){
+        const length=node=>node.nodeType===Node.TEXT_NODE?node.length:node.childNodes.length;
+        getSelection().setBaseAndExtent(anchor,Math.min(bookmark.anchorOffset,length(anchor)),focus,Math.min(bookmark.focusOffset,length(focus)));
+      }else{const range=document.createRange();range.selectNodeContents(note);range.collapse(false);selectRange(range)}
+      selection=getSelection().getRangeAt(0).cloneRange();
+    }
+    function restoreHistory(direction){
+      const state=editorHistory.move(direction);if(!state)return;
+      note.innerHTML=state.html;note.focus();restoreSelection(state.bookmark);publishEdit();
+    }
     function placeCaret(element){
       if(!element||!note.contains(element))return;
       const range=document.createRange();const walker=document.createTreeWalker(element,NodeFilter.SHOW_TEXT);
@@ -287,26 +350,26 @@ struct NoteWebView: UIViewRepresentable {
       range.collapse(true);selectRange(range);selection=range.cloneRange();
     }
     function finishEdit(restoreCaret){
-      changed();if(restoreCaret)restoreCaret();
-      selection=getSelection().rangeCount?getSelection().getRangeAt(0).cloneRange():null;
+      changed(null,restoreCaret);
     }
-    // Native editing transactions keep custom code and checklist insertions undoable.
+    function nativeCommand(name,value){
+      executingCommand=true;
+      try{return document.execCommand(name,false,value)}finally{executingCommand=false}
+    }
     function insertHTML(html,caretSelector){
       const previous=new Set(caretSelector?note.querySelectorAll(caretSelector):[]);
-      // Normalize task markup after the native edit has finished dispatching input.
-      let inserted;insertingHTML=true;
-      try{inserted=document.execCommand('insertHTML',false,html)}finally{insertingHTML=false}
-      if(!inserted)throw new Error('The editor could not insert HTML into the current selection.');
-      // Resolve the caret after normalization has created or moved task descriptions.
+      if(!nativeCommand('insertHTML',html))throw new Error('The editor could not insert HTML into the current selection.');
       return caretSelector?()=>{
         const inserted=[...note.querySelectorAll(caretSelector)].filter(e=>!previous.has(e)).pop();
         placeCaret(inserted);
       }:null;
     }
     function replaceBlock(block,html,caretSelector){
-      // Keep the selected block editable, including when it is the note's only content.
-      const range=document.createRange();range.selectNode(block);selectRange(range);
-      return insertHTML(html,caretSelector);
+      // Native HTML insertion merges list shells; structural replacements must replace the node itself.
+      const template=document.createElement('template');template.innerHTML=html;
+      const caret=[...template.content.querySelectorAll(caretSelector)].pop();
+      block.replaceWith(template.content);
+      return ()=>placeCaret(caret);
     }
     function inlineCode(){
       const range=getSelection().getRangeAt(0);const code=elementAtCaret()?.closest('code');
@@ -345,21 +408,31 @@ struct NoteWebView: UIViewRepresentable {
       return insertHTML(list.outerHTML,'.todo-list__label__description');
     }
     note.addEventListener('beforeinput',event=>{
-      if(event.inputType!=='insertParagraph'||event.isComposing||!note.isContentEditable)return;
+      if(executingCommand||!note.isContentEditable)return;
+      if(['historyUndo','historyRedo'].includes(event.inputType)){
+        event.preventDefault();restoreHistory(event.inputType==='historyUndo'?-1:1);return;
+      }
+      if(!composing)editorHistory.capture(bookmarkSelection());
+      if(event.inputType!=='insertParagraph'||event.isComposing)return;
       const item=elementAtCaret()?.closest('ul.todo-list>li');const text=item?.querySelector('.todo-list__label__description');
       if(!item||!text||text.textContent.trim()||item.querySelector('img,hr,ul,ol')||item!==item.parentElement.lastElementChild)return;
       event.preventDefault();const list=item.parentElement;const remaining=list.cloneNode(true);remaining.lastElementChild.remove();
       finishEdit(replaceBlock(list,(remaining.children.length?remaining.outerHTML:'')+'<p><br></p>','p'));
+    });
+    note.addEventListener('keydown',event=>{
+      if(!note.isContentEditable||composing||event.isComposing||!(event.metaKey||event.ctrlKey)||event.altKey)return;
+      const key=event.key.toLowerCase();
+      if(key==='z'||(event.ctrlKey&&key==='y')){event.preventDefault();restoreHistory(key==='y'||event.shiftKey?1:-1)}
     });
     note.addEventListener('click',event=>{
       if(!(event.target instanceof Element))return;
       const box=event.target.closest('.todo-list input[type=checkbox]');
       if(!note.isContentEditable)return;
       if(!box){if(event.target.closest('label.todo-list__label'))event.preventDefault();return}
+      editorHistory.capture(bookmarkSelection());
       const text=box.closest('li')?.querySelector('.todo-list__label__description');
-      event.preventDefault();const replacement=box.cloneNode();replacement.toggleAttribute('checked',!box.hasAttribute('checked'));
-      const range=document.createRange();range.selectNode(box);selectRange(range);
-      insertHTML(replacement.outerHTML);
+      event.preventDefault();const replacement=box.cloneNode();replacement.checked=!box.hasAttribute('checked');replacement.toggleAttribute('checked',replacement.checked);
+      box.replaceWith(replacement);
       finishEdit(()=>placeCaret(text));
     });
     function runCommand(name,value){
@@ -367,6 +440,8 @@ struct NoteWebView: UIViewRepresentable {
       const saved=selection;note.focus();
       if(saved&&note.contains(saved.commonAncestorContainer))selectRange(saved);
       if(!getSelection().rangeCount){const range=document.createRange();range.selectNodeContents(note);range.collapse(false);selectRange(range)}
+      editorHistory.capture(bookmarkSelection());
+      if(name==='undo'||name==='redo'){restoreHistory(name==='undo'?-1:1);return}
       let restoreCaret;
       if(name==='inlineCode')restoreCaret=inlineCode();
       else if(name==='taskList')restoreCaret=taskList();
@@ -377,8 +452,8 @@ struct NoteWebView: UIViewRepresentable {
       else if(name==='createLink'){
         if(typeof value!=='string'||!/^(https?:|mailto:|#|\\/)/i.test(value.trim()))return;
         if(getSelection().isCollapsed){const link=document.createElement('a');link.setAttribute('href',value);link.textContent=value;insertHTML(link.outerHTML)}
-        else document.execCommand(name,false,value);
-      }else document.execCommand(name,false,value);
+        else nativeCommand(name,value);
+      }else nativeCommand(name,value);
       finishEdit(restoreCaret);
     }
     </script></body></html>

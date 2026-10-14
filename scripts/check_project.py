@@ -47,6 +47,7 @@ script = re.sub(r'\\([\\"nrt])', lambda match: {"\\": "\\", '"': '"', "n": "\n",
 node = shutil.which("node")
 if node:
     subprocess.run([node, "--check"], input=script, text=True, check=True)
+    subprocess.run([node, str(ROOT / "scripts/check_editor_history.cjs")], check=True)
 else:
     print("Node unavailable: embedded JavaScript syntax check skipped")
 
