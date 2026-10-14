@@ -124,8 +124,10 @@ struct NoteDetailView: View {
     @EnvironmentObject private var model: AppModel
     let noteID: String
     var directoryID: String? = nil
+    var showsAppNavigationWhileEditing = false
     var body: some View {
-        NoteDetailContent(editor: model.editor(for: noteID), noteID: noteID, directoryID: directoryID)
+        NoteDetailContent(editor: model.editor(for: noteID), noteID: noteID, directoryID: directoryID,
+                          showsAppNavigationWhileEditing: showsAppNavigationWhileEditing)
     }
 }
 
@@ -136,6 +138,7 @@ private struct NoteDetailContent: View {
     @ObservedObject var editor: NoteEditorModel
     let noteID: String
     let directoryID: String?
+    let showsAppNavigationWhileEditing: Bool
     @State private var command: NoteWebView.EditorCommand?
     @StateObject private var webBridge = WebEditorBridge()
     @State private var preparingSave = false
@@ -172,6 +175,13 @@ private struct NoteDetailContent: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if editor.editing && showsAppNavigationWhileEditing {
+                FloatingAppNavigation(selectedTab: model.selectedTab) { tab in
+                    Task { await leave(to: tab) }
+                }.disabled(busy)
+            }
+        }
         .navigationTitle(editor.note?.title ?? "笔记")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(editor.editing ? .hidden : .visible, for: .navigationBar, .tabBar)
@@ -349,13 +359,14 @@ private struct NoteDetailContent: View {
             preview.toggle()
         } catch { model.report(error) }
     }
-    private func leave() async {
+    private func leave(to tab: AppTab? = nil) async {
         guard !busy else { return }
         preparingSave = true; defer { preparingSave = false }
         do {
             try await flushEditor()
             editor.persistDraft()
             dismiss()
+            if let tab { model.selectedTab = tab.rawValue }
         } catch { model.report(error) }
     }
     private func setSourceEditing(_ value: Bool) async {

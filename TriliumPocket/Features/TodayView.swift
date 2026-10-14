@@ -52,7 +52,7 @@ struct TodayView: View {
         }
         .navigationTitle("今天").navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar, .tabBar)
-        .navigationDestination(item: $note) { NoteDetailView(noteID: $0.id) }
+        .navigationDestination(item: $note) { NoteDetailView(noteID: $0.id, showsAppNavigationWhileEditing: true) }
         .fullScreenCover(isPresented: $showCapture) {
             QuickCaptureView(draft: $draft) { saved in lastCapture = saved }
         }
@@ -120,6 +120,11 @@ private struct QuickCaptureView: View {
             NoteDirectorySidebar(draftTitle: draft.title.trimmingCharacters(in: .whitespacesAndNewlines),
                                  onClose: closeDirectory)
         }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            FloatingAppNavigation(selectedTab: model.selectedTab) { tab in
+                Task { await leave(to: tab) }
+            }.disabled(busy)
+        }
         .interactiveDismissDisabled(busy)
         .alert("无法完成操作", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
             Button("好", role: .cancel) { error = nil }
@@ -184,10 +189,14 @@ private struct QuickCaptureView: View {
         }
         hideKeyboard()
     }
-    private func leave() async {
+    private func leave(to tab: AppTab? = nil) async {
         guard !busy else { return }
         preparingSave = true; defer { preparingSave = false }
-        do { try await flushEditor(); dismiss() } catch { self.error = error.localizedDescription }
+        do {
+            try await flushEditor()
+            dismiss()
+            if let tab { model.selectedTab = tab.rawValue }
+        } catch { self.error = error.localizedDescription }
     }
     private func openDirectory() async {
         guard !busy else { return }
