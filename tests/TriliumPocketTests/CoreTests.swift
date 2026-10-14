@@ -292,6 +292,98 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(note.noteId, "sharedNote")
     }
 
+    func testAIModelsUseProviderSubpathAndCurrentKeyWithoutSelectedModel() async throws {
+        let fixture = try makeClient { request in
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertEqual(request.url?.path, "/trilium/models")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer provider-key")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "application/json")
+            return (200, Data("""
+            {"object":"list","data":[
+                {"id":"z-model","object":"model"},{"id":"a-model"},{"id":"z-model"},{"id":"  "},
+                {"id":" a-model\\n"}
+            ]}
+            """.utf8))
+        }
+        defer { dispose(fixture) }
+        let client = try AIClient(address: fixture.baseURL.absoluteString, apiKey: " provider-key\n",
+                                  allowHTTP: false, session: fixture.session)
+
+        let identifiers = try await client.models()
+        XCTAssertEqual(identifiers, ["a-model", "z-model"])
+    }
+
+    func testAIModelListAllowsProvidersWithoutAPIKeysAndEmptyLists() async throws {
+        let fixture = try makeClient { request in
+            XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+            return (200, Data("{\"data\":[]}".utf8))
+        }
+        defer { dispose(fixture) }
+        let client = try AIClient(address: fixture.baseURL.absoluteString, apiKey: " \n",
+                                  allowHTTP: false, session: fixture.session)
+
+        let identifiers = try await client.models()
+        XCTAssertTrue(identifiers.isEmpty)
+    }
+
+    func testAIModelListReportsAuthenticationErrorsAndRedirects() async throws {
+        for status in [302, 401, 403, 404, 429, 500] {
+            let fixture = try makeClient { _ in
+                (status, Data("{\"error\":{\"message\":\"Provider detail\"}}".utf8))
+            }
+            defer { dispose(fixture) }
+            let client = try AIClient(address: fixture.baseURL.absoluteString, apiKey: "key",
+                                      allowHTTP: false, session: fixture.session)
+            do {
+                _ = try await client.models()
+                XCTFail("HTTP \(status) must fail")
+            } catch {
+                if status == 302 {
+                    XCTAssertTrue(error.localizedDescription.contains("重定向"))
+                } else {
+                    XCTAssertTrue(error.localizedDescription.contains("HTTP \(status)"))
+                    XCTAssertTrue(error.localizedDescription.contains("Provider detail"))
+                }
+            }
+        }
+    }
+
+    func testAIModelListRejectsMalformedSuccessResponses() async throws {
+        for payload in ["<html>Gateway</html>", "{}", "{\"data\":[{}]}", "{\"data\":null}"] {
+            let fixture = try makeClient { _ in (200, Data(payload.utf8)) }
+            defer { dispose(fixture) }
+            let client = try AIClient(address: fixture.baseURL.absoluteString, apiKey: "key",
+                                      allowHTTP: false, session: fixture.session)
+            do {
+                _ = try await client.models()
+                XCTFail("Malformed model list must fail")
+            } catch {
+                XCTAssertTrue(error.localizedDescription.contains("无法解析的模型列表"))
+            }
+        }
+    }
+
+    func testAIChatRequiresManualModelSelectionBeforeSendingRequest() async throws {
+        let fixture = try makeClient { _ in
+            XCTFail("No request should be sent before choosing a model")
+            return (200, Data())
+        }
+        defer { dispose(fixture) }
+        XCTAssertThrowsError(try AIClient(address: fixture.baseURL.absoluteString, apiKey: "key", model: " \n",
+                                         allowHTTP: false, session: fixture.session)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("选择 AI 模型"))
+        }
+        let client = try AIClient(address: fixture.baseURL.absoluteString, apiKey: "key",
+                                  allowHTTP: false, session: fixture.session)
+        do {
+            try await client.stream(messages: []) { _ in XCTFail("No text should be delivered") }
+            XCTFail("Chat without a selected model must fail")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("选择 AI 模型"))
+        }
+        XCTAssertTrue(ServerConfiguration().aiModel.isEmpty)
+    }
+
     private func makeClient(handler: @escaping ContractURLProtocol.Handler) throws -> APIClient {
         let host = "test-\(UUID().uuidString.lowercased()).example.com"
         let url = try XCTUnwrap(URL(string: "https://\(host)/trilium/"))

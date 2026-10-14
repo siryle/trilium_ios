@@ -50,7 +50,7 @@ struct AppInfo: Decodable { let appVersion: String }
 struct ServerConfiguration: Codable, Equatable {
     var address = ""
     var aiAddress = "https://api.openai.com/v1"
-    var aiModel = "gpt-4o-mini"
+    var aiModel = ""
     var aiSaveParentID = "root"
     var allowHTTP = false
 }

@@ -5,8 +5,9 @@ struct AIClient {
     let baseURL: URL
     let apiKey: String
     let model: String
+    let session: URLSession
 
-    private static let session: URLSession = {
+    private static let sharedSession: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 120
         configuration.timeoutIntervalForResource = 600
@@ -15,14 +16,32 @@ struct AIClient {
         return URLSession(configuration: configuration, delegate: NoRedirectDelegate(), delegateQueue: nil)
     }()
 
-    init(address: String, apiKey: String, model: String, allowHTTP: Bool) throws {
+    init(address: String, apiKey: String, model: String? = nil, allowHTTP: Bool, session: URLSession? = nil) throws {
         baseURL = try APIClient.validatedURL(address, allowHTTP: allowHTTP)
         self.apiKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.model = model.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !self.model.isEmpty else { throw UserFacingError(message: "请先在设置中填写 AI 模型名称。") }
+        self.model = model?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.session = session ?? Self.sharedSession
+        if model != nil && self.model.isEmpty {
+            throw UserFacingError(message: "请先在设置中刷新模型列表并选择 AI 模型。")
+        }
+    }
+
+    func models() async throws -> [String] {
+        var request = URLRequest(url: baseURL.appendingPathComponent("models"), timeoutInterval: 45)
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if !apiKey.isEmpty { request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
+        let (data, response) = try await session.data(for: request)
+        try Task.checkCancellation()
+        try Self.check(response, data: data)
+        let result: ModelsResponse
+        do { result = try JSONDecoder().decode(ModelsResponse.self, from: data) }
+        catch { throw UserFacingError(message: "AI 服务返回了无法解析的模型列表。") }
+        let identifiers = result.data.map { $0.id.trimmingCharacters(in: .whitespacesAndNewlines) }
+        return Array(Set(identifiers.filter { !$0.isEmpty })).sorted()
     }
 
     func stream(messages: [ChatMessage], onText: @MainActor (String) -> Void) async throws {
+        guard !model.isEmpty else { throw UserFacingError(message: "请先在设置中刷新模型列表并选择 AI 模型。") }
         var request = URLRequest(url: baseURL.appendingPathComponent("chat").appendingPathComponent("completions"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -32,9 +51,9 @@ struct AIClient {
             "model": model, "stream": true,
             "messages": messages.map { ["role": $0.role, "content": $0.content] }
         ])
-        let (bytes, response) = try await Self.session.bytes(for: request)
+        let (bytes, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse else { throw UserFacingError(message: "AI 服务响应无效。") }
-        guard (200..<300).contains(http.statusCode) else {
+        if !(200..<300).contains(http.statusCode) {
             // Bound and decode errors without logging headers, credentials or prompts.
             var data = Data()
             for try await byte in bytes {
@@ -42,11 +61,7 @@ struct AIClient {
                 data.append(byte)
                 if data.count >= 16_384 { break }
             }
-            if (300..<400).contains(http.statusCode) {
-                throw UserFacingError(message: "AI 服务返回重定向，请在设置中填写最终 API 地址。")
-            }
-            let detail = Self.errorMessage(data)
-            throw UserFacingError(message: "AI 请求失败（HTTP \(http.statusCode)）" + (detail.map { "：\($0)" } ?? "。"))
+            try Self.check(response, data: data)
         }
         guard http.value(forHTTPHeaderField: "Content-Type")?.lowercased().contains("text/event-stream") == true else {
             throw UserFacingError(message: "AI 服务没有返回 SSE 流，请检查是否支持 OpenAI Chat Completions。")
@@ -100,11 +115,27 @@ struct AIClient {
         guard sawFinish else { throw UserFacingError(message: "AI 连接提前结束，已保留部分回复。请重试。") }
     }
 
+    private static func check(_ response: URLResponse, data: Data) throws {
+        guard let http = response as? HTTPURLResponse else { throw UserFacingError(message: "AI 服务响应无效。") }
+        guard (200..<300).contains(http.statusCode) else {
+            if (300..<400).contains(http.statusCode) {
+                throw UserFacingError(message: "AI 服务返回重定向，请在设置中填写最终 API 地址。")
+            }
+            let detail = Self.errorMessage(data)
+            throw UserFacingError(message: "AI 请求失败（HTTP \(http.statusCode)）" + (detail.map { "：\($0)" } ?? "。"))
+        }
+    }
+
     private static func errorMessage(_ data: Data) -> String? {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let error = root["error"] else { return nil }
         let message = (error as? [String: Any])?["message"] as? String ?? error as? String ?? "服务返回未知错误。"
         return String(message.prefix(500))
     }
+}
+
+private struct ModelsResponse: Decodable {
+    let data: [Model]
+    struct Model: Decodable { let id: String }
 }
 
 private struct CompletionChunk: Decodable {
