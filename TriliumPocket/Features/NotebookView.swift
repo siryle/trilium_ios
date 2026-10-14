@@ -5,6 +5,9 @@ struct NotebookView: View {
     let noteID: String
     let title: String
     var picking: ((Note) -> Void)? = nil
+    var highlightedNoteID: String? = nil
+    var draftTitle: String? = nil
+    var onResumeDraft: (() -> Void)? = nil
     @State private var entries: [TreeEntry] = []
     @State private var parent: Note?
     @State private var loading = false
@@ -19,7 +22,16 @@ struct NotebookView: View {
                         Button { picking?(parent) } label: { Label("选择此目录", systemImage: "checkmark.circle") }
                     } else if let parent, noteID != "root" {
                         NavigationLink { NoteDetailView(noteID: parent.id) } label: {
-                            Label("查看本笔记", systemImage: "doc.text.magnifyingglass")
+                            Label(parent.id == highlightedNoteID ? parent.title : "查看本笔记", systemImage: "doc.text.magnifyingglass")
+                        }
+                        .listRowBackground(parent.id == highlightedNoteID ? Color(.systemGray5) : nil)
+                    }
+                    if let draftTitle, let onResumeDraft {
+                        Button(action: onResumeDraft) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(draftTitle).foregroundStyle(.primary)
+                                Text("本机草稿").font(.caption).foregroundStyle(.secondary)
+                            }.padding(.vertical, 6)
                         }
                     }
                     ForEach(entries) { entry in
@@ -46,7 +58,7 @@ struct NotebookView: View {
                 }
                 .overlay {
                     if loading && entries.isEmpty { ProgressView("加载目录…") }
-                    else if entries.isEmpty && failure == nil && parent != nil && picking == nil {
+                    else if entries.isEmpty && failure == nil && parent != nil && picking == nil && draftTitle == nil {
                         ContentUnavailableView("暂无子笔记", systemImage: "folder", description: Text("点击右上角 + 在此目录创建笔记。"))
                             .allowsHitTesting(false)
                     }

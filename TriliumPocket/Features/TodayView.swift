@@ -107,12 +107,39 @@ private struct QuickCaptureView: View {
     @State private var error: String?
     @State private var command: NoteWebView.EditorCommand?
     @State private var requestedFocus = false
+    @State private var showDirectory = false
     @StateObject private var bridge = WebEditorBridge()
     @FocusState private var titleFocused: Bool
 
     private var busy: Bool { saving || preparingSave }
 
     var body: some View {
+        GeometryReader { geometry in
+            let drawerWidth = min(geometry.size.width * 0.84, 380)
+            ZStack(alignment: .leading) {
+                editor
+                    .offset(x: showDirectory ? drawerWidth : 0)
+                    .allowsHitTesting(!showDirectory)
+                    .accessibilityHidden(showDirectory)
+                if showDirectory {
+                    Color.black.opacity(0.12).ignoresSafeArea()
+                        .onTapGesture { closeDirectory() }
+                        .accessibilityHidden(true)
+                    CaptureDirectoryView(draftTitle: draft.title.trimmingCharacters(in: .whitespacesAndNewlines),
+                                         onClose: closeDirectory)
+                        .frame(width: drawerWidth)
+                        .transition(.move(edge: .leading))
+                        .shadow(color: .black.opacity(0.08), radius: 12, x: 4)
+                }
+            }
+        }
+        .interactiveDismissDisabled(busy)
+        .alert("无法完成操作", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
+            Button("好", role: .cancel) { error = nil }
+        } message: { Text(error ?? "") }
+    }
+
+    private var editor: some View {
         VStack(alignment: .leading, spacing: 0) {
             header.padding(.horizontal, 12).padding(.top, 8)
             TextField("日记标题", text: $draft.title, prompt: Text("未命名").foregroundColor(.primary), axis: .vertical)
@@ -145,25 +172,21 @@ private struct QuickCaptureView: View {
                     .disabled(busy)
             }
         }
-        .interactiveDismissDisabled(busy)
         .onChange(of: bridge.isLoading) { _, loading in
-            guard !loading, bridge.ready, !requestedFocus, !preview, !sourceEditing, !titleFocused, !busy else { return }
+            guard !loading, bridge.ready, !requestedFocus, !preview, !sourceEditing, !titleFocused, !busy, !showDirectory else { return }
             requestedFocus = true
             bridge.web?.evaluateJavaScript("document.getElementById('note').focus()", completionHandler: nil)
         }
-        .alert("无法完成操作", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
-            Button("好", role: .cancel) { error = nil }
-        } message: { Text(error ?? "") }
     }
 
     private var header: some View {
         HStack {
-            Button { Task { await leave() } } label: {
+            Button { Task { await openDirectory() } } label: {
                 Image(systemName: "sidebar.left").frame(width: 44, height: 44)
             }
             .background(Color(.systemBackground), in: Circle())
             .shadow(color: .black.opacity(0.06), radius: 12, y: 4)
-            .accessibilityLabel("返回今天并保留草稿")
+            .accessibilityLabel("打开笔记目录，定位今日日记")
             Spacer()
             if saving { ProgressView().padding(.trailing, 12) }
             HStack(spacing: 0) {
@@ -215,6 +238,18 @@ private struct QuickCaptureView: View {
         preparingSave = true; defer { preparingSave = false }
         do { try await flushEditor(); dismiss() } catch { self.error = error.localizedDescription }
     }
+    private func openDirectory() async {
+        guard !busy else { return }
+        preparingSave = true; defer { preparingSave = false }
+        do {
+            try await flushEditor()
+            requestedFocus = true
+            withAnimation(.easeInOut(duration: 0.25)) { showDirectory = true }
+        } catch { self.error = error.localizedDescription }
+    }
+    private func closeDirectory() {
+        withAnimation(.easeInOut(duration: 0.25)) { showDirectory = false }
+    }
     private func togglePreview() async {
         guard !busy else { return }
         preparingSave = true; defer { preparingSave = false }
@@ -233,5 +268,64 @@ private struct QuickCaptureView: View {
             let result = try await api.create(parentID: day.id, title: snapshot.noteTitle(), content: snapshot.content)
             draft = QuickCaptureDraft(); onSaved(result); model.changeVersion += 1; dismiss()
         } catch { self.error = error.localizedDescription }
+    }
+}
+
+@MainActor
+private struct CaptureDirectoryView: View {
+    @EnvironmentObject private var model: AppModel
+    let draftTitle: String
+    let onClose: () -> Void
+    @State private var day: Note?
+    @State private var failure: String?
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if let day {
+                    NotebookView(noteID: day.id, title: "笔记目录", highlightedNoteID: day.id,
+                                 draftTitle: draftTitle.isEmpty ? "未命名" : draftTitle, onResumeDraft: onClose)
+                        .safeAreaInset(edge: .bottom) {
+                            NavigationLink {
+                                NotebookView(noteID: "root", title: "文件列表")
+                            } label: {
+                                Label("文件列表", systemImage: "folder")
+                                    .font(.headline).frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(16)
+                                    .background(Color(.systemGray6), in: Capsule())
+                            }.padding(16).background(Color(.systemBackground))
+                        }
+                } else if let failure {
+                    ContentUnavailableView {
+                        Label("无法加载目录", systemImage: "folder.badge.questionmark")
+                    } description: { Text(failure) } actions: {
+                        Button("重试") { Task { await load() } }
+                    }
+                } else {
+                    ProgressView("定位今日日记…").frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .navigationTitle("笔记目录").navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(action: onClose) { Image(systemName: "sidebar.left") }
+                        .accessibilityLabel("收起目录，继续编辑")
+                }
+            }
+        }
+        .background(Color(.systemBackground).ignoresSafeArea())
+        .task { await load() }
+    }
+
+    private func load() async {
+        failure = nil
+        do {
+            let result = try await model.client().dayNote()
+            try Task.checkCancellation()
+            day = result
+        } catch {
+            if error is CancellationError || (error as? URLError)?.code == .cancelled { return }
+            failure = error.localizedDescription
+        }
     }
 }
