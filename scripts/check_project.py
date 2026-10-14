@@ -49,6 +49,7 @@ if node:
     subprocess.run([node, "--check"], input=script, text=True, check=True)
     subprocess.run([node, str(ROOT / "scripts/check_editor_history.cjs")], check=True)
     subprocess.run([node, str(ROOT / "scripts/check_markdown_tables.cjs")], check=True)
+    subprocess.run([node, str(ROOT / "scripts/check_markdown_layout.cjs")], check=True)
 else:
     print("Node unavailable: embedded JavaScript syntax check skipped")
 

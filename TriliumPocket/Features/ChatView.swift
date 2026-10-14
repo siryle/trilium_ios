@@ -162,7 +162,7 @@ struct ChatView: View {
                     .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 if !message.content.isEmpty {
                     if user { Text(message.content).textSelection(.enabled) }
-                    else { Text(markdown(message.content)).textSelection(.enabled) }
+                    else { MarkdownContent(source: message.content) }
                 } else if activeReplyID == message.id && isStreaming {
                     ProgressView("正在思考…").font(.caption)
                 }
@@ -179,10 +179,6 @@ struct ChatView: View {
             .background(user ? Color.accentColor.opacity(0.12) : Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 18))
             if !user { Spacer(minLength: 12) }
         }
-    }
-
-    private func markdown(_ text: String) -> AttributedString {
-        (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
     }
 
     private func loadConversation() {
@@ -371,7 +367,7 @@ struct ChatView: View {
             if let reason = archive.interrupted[message.id.uuidString] {
                 html += "<p>未完成：\(HTMLText.escape(reason))</p>"
             }
-            html += HTMLText.paragraphs(message.content)
+            html += MarkdownHTML.messageHTML(message)
         }
         return html
     }

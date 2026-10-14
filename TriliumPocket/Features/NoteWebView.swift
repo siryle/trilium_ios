@@ -40,11 +40,12 @@ final class WebEditorBridge: ObservableObject {
 struct NoteWebView: UIViewRepresentable {
     let content: String
     let editing: Bool
-    let api: APIClient
+    let api: APIClient?
     let bridge: WebEditorBridge
     let command: EditorCommand?
     let onChange: (String) -> Void
     let onNoteLink: (String) -> Void
+    var onHeightChange: ((CGFloat) -> Void)? = nil
     struct EditorCommand: Equatable { let id = UUID(); let name: String; var value: String? = nil }
 
     // Reuse one in-memory store so opening another note does not create a new networking session.
@@ -57,13 +58,16 @@ struct NoteWebView: UIViewRepresentable {
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         configuration.userContentController.add(coordinator, name: "edited")
         configuration.userContentController.add(coordinator, name: "table")
+        configuration.userContentController.add(coordinator, name: "height")
         configuration.setURLSchemeHandler(coordinator, forURLScheme: "trilium-resource")
         let web = NoteEditorWebView(frame: .zero, configuration: configuration)
         web.inputAssistantItem.leadingBarButtonGroups = []
         web.inputAssistantItem.trailingBarButtonGroups = []
         web.navigationDelegate = coordinator
-        web.isOpaque = false; web.backgroundColor = .systemBackground
-        web.scrollView.backgroundColor = .systemBackground
+        let embedded = onHeightChange != nil
+        web.isOpaque = false; web.backgroundColor = embedded ? .clear : .systemBackground
+        web.scrollView.backgroundColor = embedded ? .clear : .systemBackground
+        web.scrollView.isScrollEnabled = !embedded
         web.scrollView.contentInsetAdjustmentBehavior = .never
         web.scrollView.keyboardDismissMode = .interactive
         coordinator.web = web
@@ -91,6 +95,7 @@ struct NoteWebView: UIViewRepresentable {
         }
         web.configuration.userContentController.removeScriptMessageHandler(forName: "edited")
         web.configuration.userContentController.removeScriptMessageHandler(forName: "table")
+        web.configuration.userContentController.removeScriptMessageHandler(forName: "height")
         coordinator.cancelResourceTasks()
         coordinator.navigation = nil
         coordinator.web = nil
@@ -165,7 +170,8 @@ struct NoteWebView: UIViewRepresentable {
                 renderRevision += 1
                 let revision = renderRevision
                 pendingContent = content; pendingEditing = editing
-                web.evaluateJavaScript("setNote('\(encoded)', \(editing ? "true" : "false")); true") { [weak self] _, error in
+                let embedded = parent.onHeightChange != nil
+                web.evaluateJavaScript("setEmbedded(\(embedded ? "true" : "false")); setNote('\(encoded)', \(editing ? "true" : "false")); true") { [weak self] _, error in
                     guard let self, self.renderRevision == revision, self.parent.bridge.web === web else { return }
                     self.pendingContent = nil; self.pendingEditing = nil
                     guard error == nil else { self.failDisplay(); return }
@@ -190,6 +196,10 @@ struct NoteWebView: UIViewRepresentable {
             }
         }
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            if message.name == "height", let height = message.body as? Double, height.isFinite, height > 0 {
+                parent.onHeightChange?(CGFloat(height))
+                return
+            }
             if message.name == "table", parent.editing, let draft = message.body as? [String: String] {
                 parent.bridge.tableDraft = .init(source: draft["source"] ?? MarkdownTable.template,
                                                error: draft["error"], isNew: draft["source"] == nil)
@@ -215,7 +225,7 @@ struct NoteWebView: UIViewRepresentable {
             guard let url = urlSchemeTask.request.url, url.host == "local" else { urlSchemeTask.didFailWithError(URLError(.badURL)); return }
             let parts = url.path.split(separator: "/").map(String.init)
             guard parts.count == 3, ["notes", "attachments"].contains(parts[0]), parts[2] == "content" else { urlSchemeTask.didFailWithError(URLError(.badURL)); return }
-            let api = parent.api
+            guard let api = parent.api else { urlSchemeTask.didFailWithError(URLError(.resourceUnavailable)); return }
             let generation = resourceGeneration
             tasks[key] = Task { @MainActor in
                 defer { if resourceGeneration == generation { tasks[key] = nil } }
@@ -258,6 +268,10 @@ struct NoteWebView: UIViewRepresentable {
     #note ul.todo-list{list-style:none;padding-inline-start:0}ul.todo-list>li{position:relative;padding-inline-start:26px}
     .todo-list__label>input{position:absolute;inset-inline-start:0;top:5px;width:18px;height:18px;margin:0;accent-color:#009e92}
     #note[contenteditable=true] .todo-list__label>input{pointer-events:auto}
+    html.embedded body{margin:0;background:transparent}
+    html.embedded #note{min-height:0;display:flow-root}
+    html.embedded #note>:first-child{margin-top:0}
+    html.embedded #note>:last-child{margin-bottom:0}
     </style></head>
     <body><article id="note"></article><script>
     // One history for native edits and DOM replacements; store only the changed HTML and caret paths.
@@ -296,6 +310,13 @@ struct NoteWebView: UIViewRepresentable {
     }
     const editorHistory=new EditorHistory();
     const note=document.getElementById('note');let timer;let selection;let modified=false;let rendered='';let executingCommand=false;let composing=false;let tableEdit;
+    function setEmbedded(enabled){document.documentElement.classList.toggle('embedded',enabled)}
+    let reportedHeight=0;
+    new ResizeObserver(()=>{
+      if(!document.documentElement.classList.contains('embedded'))return;
+      const height=Math.ceil(note.getBoundingClientRect().height);
+      if(height>0&&height!==reportedHeight){reportedHeight=height;window.webkit.messageHandlers.height.postMessage(height)}
+    }).observe(note);
     document.addEventListener('selectionchange',()=>{const s=getSelection();if(s.rangeCount&&note.contains(s.anchorNode))selection=s.getRangeAt(0).cloneRange()});
     function sanitize(html){const t=document.createElement('template');t.innerHTML=html;
       t.content.querySelectorAll('script,style,iframe,object,embed,link,meta,base,form').forEach(e=>e.remove());

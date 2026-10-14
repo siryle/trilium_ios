@@ -102,20 +102,7 @@ enum MarkdownTable {
         // Foundation handles inline Markdown; only the explicit line-break tag is accepted as HTML.
         let normalized = inlineParts(source).joined(separator: "\n")
         let text = try AttributedString(markdown: normalized, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
-        return text.runs.map { run in
-            var html = HTMLText.escape(String(text[run.range].characters)).replacingOccurrences(of: "\n", with: "<br>")
-            let intent = run.inlinePresentationIntent ?? []
-            if intent.contains(.code) { html = "<code>\(html)</code>" }
-            if intent.contains(.stronglyEmphasized) { html = "<strong>\(html)</strong>" }
-            if intent.contains(.emphasized) { html = "<em>\(html)</em>" }
-            if intent.contains(.strikethrough) { html = "<del>\(html)</del>" }
-            if let link = run.link,
-               ["http", "https", "mailto"].contains(link.scheme?.lowercased() ?? "") ||
-                link.absoluteString.hasPrefix("#") || link.absoluteString.hasPrefix("/") {
-                html = "<a href=\"\(HTMLText.escape(link.absoluteString))\">\(html)</a>"
-            }
-            return html
-        }.joined()
+        return MarkdownHTML.inlineHTML(text, preserveLineBreaks: true)
     }
 
     private static func inlineParts(_ source: String) -> [String] {

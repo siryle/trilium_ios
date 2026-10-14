@@ -273,9 +273,7 @@ private struct NoteDetailContent: View {
                             api: api, bridge: webBridge, command: command,
                             onChange: { editor.content = $0; editor.persistDraft() },
                             onSourceEdit: { editor.sourceEditing = true; editor.editing = true; preview = false },
-                            onNoteLink: { id in Task {
-                                do { linkedNote = try await model.client().note(id) } catch { model.report(error) }
-                            } })
+                            onNoteLink: openLinkedNote)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .layoutPriority(1)
         } else if editing {
@@ -290,13 +288,19 @@ private struct NoteDetailContent: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     if !note.isEditable { Text("\(note.type) · 只读内容").font(.caption).foregroundStyle(.secondary) }
-                    if note.mime.contains("markdown"), let markdown = try? AttributedString(markdown: editor.content, options: .init(interpretedSyntax: .full)) {
-                        Text(markdown).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+                    if note.mime.contains("markdown") {
+                        MarkdownContent(source: editor.content, api: try? model.client(), onNoteLink: openLinkedNote)
                     } else {
                         Text(editor.content).font(.system(.body, design: .monospaced)).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
                     }
                 }.padding(20)
             }
+        }
+    }
+
+    private func openLinkedNote(_ id: String) {
+        Task {
+            do { linkedNote = try await model.client().note(id) } catch { model.report(error) }
         }
     }
 
