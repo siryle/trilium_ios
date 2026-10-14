@@ -112,6 +112,12 @@ struct ChatView: View {
                 if !isStreaming && canRetry {
                     Button("重试", systemImage: "arrow.clockwise") { retry() }.font(.caption)
                 }
+                if composerFocused {
+                    Button { composerFocused = false } label: {
+                        Image(systemName: "keyboard.chevron.compact.down").frame(width: 44, height: 44)
+                    }
+                    .accessibilityLabel("收起键盘")
+                }
             }
             if let note = model.contextNote, model.contextContent != nil, !note.isProtected {
                 HStack {
