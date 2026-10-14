@@ -294,8 +294,9 @@ struct NoteWebView: UIViewRepresentable {
     function insertHTML(html,caretSelector){
       const previous=new Set(caretSelector?note.querySelectorAll(caretSelector):[]);
       // Normalize task markup after the native edit has finished dispatching input.
-      insertingHTML=true;
-      try{document.execCommand('insertHTML',false,html)}finally{insertingHTML=false}
+      let inserted;insertingHTML=true;
+      try{inserted=document.execCommand('insertHTML',false,html)}finally{insertingHTML=false}
+      if(!inserted)throw new Error('The editor could not insert HTML into the current selection.');
       // Resolve the caret after normalization has created or moved task descriptions.
       return caretSelector?()=>{
         const inserted=[...note.querySelectorAll(caretSelector)].filter(e=>!previous.has(e)).pop();
@@ -303,14 +304,9 @@ struct NoteWebView: UIViewRepresentable {
       }:null;
     }
     function replaceBlock(block,html,caretSelector){
-      // Treat the old block as atomic so native insertion cannot retain or merge its list markup.
-      const editable=block.getAttribute('contenteditable');block.contentEditable='false';
+      // Keep the selected block editable, including when it is the note's only content.
       const range=document.createRange();range.selectNode(block);selectRange(range);
-      try{return insertHTML(html,caretSelector)}
-      finally{
-        // Undo restores this same node, which must remain editable.
-        if(editable===null)block.removeAttribute('contenteditable');else block.setAttribute('contenteditable',editable);
-      }
+      return insertHTML(html,caretSelector);
     }
     function inlineCode(){
       const range=getSelection().getRangeAt(0);const code=elementAtCaret()?.closest('code');
