@@ -124,10 +124,10 @@ struct NoteDetailView: View {
     @EnvironmentObject private var model: AppModel
     let noteID: String
     var directoryID: String? = nil
-    var showsAppNavigationWhileEditing = false
+    var keepsAppNavigationWhileEditing = false
     var body: some View {
         NoteDetailContent(editor: model.editor(for: noteID), noteID: noteID, directoryID: directoryID,
-                          showsAppNavigationWhileEditing: showsAppNavigationWhileEditing)
+                          keepsAppNavigationWhileEditing: keepsAppNavigationWhileEditing)
     }
 }
 
@@ -138,7 +138,7 @@ private struct NoteDetailContent: View {
     @ObservedObject var editor: NoteEditorModel
     let noteID: String
     let directoryID: String?
-    let showsAppNavigationWhileEditing: Bool
+    let keepsAppNavigationWhileEditing: Bool
     @State private var command: NoteWebView.EditorCommand?
     @StateObject private var webBridge = WebEditorBridge()
     @State private var preparingSave = false
@@ -175,16 +175,10 @@ private struct NoteDetailContent: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            if editor.editing && showsAppNavigationWhileEditing {
-                FloatingAppNavigation(selectedTab: model.selectedTab) { tab in
-                    Task { await leave(to: tab) }
-                }.disabled(busy)
-            }
-        }
         .navigationTitle(editor.note?.title ?? "笔记")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar(editor.editing ? .hidden : .visible, for: .navigationBar, .tabBar)
+        .toolbar(editor.editing ? .hidden : .visible, for: .navigationBar)
+        .toolbar(editor.editing && !keepsAppNavigationWhileEditing ? .hidden : .visible, for: .tabBar)
         .navigationBarBackButtonHidden(editor.editing)
         .toolbar {
             if let note = editor.note, editor.failure == nil, !editor.editing {
@@ -204,8 +198,16 @@ private struct NoteDetailContent: View {
         .onChange(of: editor.editing) { _, _ in
             preview = false; showDirectory = false
         }
+        .onChange(of: model.selectedTab) { previous, selected in
+            guard keepsAppNavigationWhileEditing, editor.editing,
+                  previous == AppTab.today.rawValue, selected != previous else { return }
+            guard !busy else { model.selectedTab = previous; return }
+            Task { await leave() }
+        }
         .onDisappear { editor.persistDraft() }
-        .navigationDestination(item: $linkedNote) { NoteDetailView(noteID: $0.id) }
+        .navigationDestination(item: $linkedNote) {
+            NoteDetailView(noteID: $0.id, keepsAppNavigationWhileEditing: keepsAppNavigationWhileEditing)
+        }
         .confirmationDialog("放弃未保存的本机修改？", isPresented: $discard, titleVisibility: .visible) {
             Button("放弃草稿", role: .destructive) { editor.discardDraft() }
             Button("继续编辑", role: .cancel) { }
@@ -359,15 +361,17 @@ private struct NoteDetailContent: View {
             preview.toggle()
         } catch { model.report(error) }
     }
-    private func leave(to tab: AppTab? = nil) async {
+    private func leave() async {
         guard !busy else { return }
         preparingSave = true; defer { preparingSave = false }
         do {
             try await flushEditor()
             editor.persistDraft()
             dismiss()
-            if let tab { model.selectedTab = tab.rawValue }
-        } catch { model.report(error) }
+        } catch {
+            if keepsAppNavigationWhileEditing { model.selectedTab = AppTab.today.rawValue }
+            model.report(error)
+        }
     }
     private func setSourceEditing(_ value: Bool) async {
         guard !busy else { return }

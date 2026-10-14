@@ -52,8 +52,8 @@ struct TodayView: View {
         }
         .navigationTitle("今天").navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar, .tabBar)
-        .navigationDestination(item: $note) { NoteDetailView(noteID: $0.id, showsAppNavigationWhileEditing: true) }
-        .fullScreenCover(isPresented: $showCapture) {
+        .navigationDestination(item: $note) { NoteDetailView(noteID: $0.id, keepsAppNavigationWhileEditing: true) }
+        .navigationDestination(isPresented: $showCapture) {
             QuickCaptureView(draft: $draft) { saved in lastCapture = saved }
         }
         .onAppear {
@@ -120,12 +120,14 @@ private struct QuickCaptureView: View {
             NoteDirectorySidebar(draftTitle: draft.title.trimmingCharacters(in: .whitespacesAndNewlines),
                                  onClose: closeDirectory)
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            FloatingAppNavigation(selectedTab: model.selectedTab) { tab in
-                Task { await leave(to: tab) }
-            }.disabled(busy)
+        .toolbar(.hidden, for: .navigationBar)
+        .toolbar(.visible, for: .tabBar)
+        .navigationBarBackButtonHidden()
+        .onChange(of: model.selectedTab) { previous, selected in
+            guard previous == AppTab.today.rawValue, selected != previous else { return }
+            guard !busy else { model.selectedTab = previous; return }
+            Task { await leave() }
         }
-        .interactiveDismissDisabled(busy)
         .alert("无法完成操作", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
             Button("好", role: .cancel) { error = nil }
         } message: { Text(error ?? "") }
@@ -189,14 +191,16 @@ private struct QuickCaptureView: View {
         }
         hideKeyboard()
     }
-    private func leave(to tab: AppTab? = nil) async {
+    private func leave() async {
         guard !busy else { return }
         preparingSave = true; defer { preparingSave = false }
         do {
             try await flushEditor()
             dismiss()
-            if let tab { model.selectedTab = tab.rawValue }
-        } catch { self.error = error.localizedDescription }
+        } catch {
+            model.selectedTab = AppTab.today.rawValue
+            self.error = error.localizedDescription
+        }
     }
     private func openDirectory() async {
         guard !busy else { return }

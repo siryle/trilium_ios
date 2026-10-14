@@ -54,35 +54,6 @@ enum AppTab: Int, CaseIterable, Identifiable {
     @MainActor var label: some View { Label(title, systemImage: icon) }
 }
 
-@MainActor
-struct FloatingAppNavigation: View {
-    let selectedTab: Int
-    let onSelect: (AppTab) -> Void
-
-    var body: some View {
-        HStack(spacing: 0) {
-            ForEach(AppTab.allCases) { tab in
-                Button { onSelect(tab) } label: {
-                    VStack(spacing: 4) {
-                        Image(systemName: tab.icon).font(.system(size: 21))
-                        Text(tab.title).font(.caption2)
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 54)
-                    .contentShape(Rectangle())
-                }
-                .foregroundStyle(selectedTab == tab.rawValue ? Color.teal : Color.secondary)
-                .accessibilityLabel(tab.title)
-                .accessibilityAddTraits(selectedTab == tab.rawValue ? .isSelected : [])
-            }
-        }
-        .buttonStyle(.plain)
-        .padding(.horizontal, 8).padding(.vertical, 4)
-        .background(.regularMaterial, in: Capsule())
-        .shadow(color: .black.opacity(0.12), radius: 14, y: 4)
-        .padding(.horizontal, 16).padding(.top, 4).padding(.bottom, 8)
-    }
-}
-
 struct ConnectionPlaceholder: View {
     @EnvironmentObject private var model: AppModel
     var body: some View {
