@@ -10,14 +10,29 @@ private final class NoteEditorWebView: WKWebView {
 
 @MainActor
 final class WebEditorBridge: ObservableObject {
+    struct TableDraft: Identifiable {
+        let id = UUID()
+        let source: String
+        let error: String?
+        let isNew: Bool
+    }
     weak var web: WKWebView?
     var ready = false
     @Published var isLoading = true
     @Published var displayError: String?
+    @Published var tableDraft: TableDraft?
     func flush() async throws -> String? {
         guard ready, let web else { throw UserFacingError(message: "编辑器正在准备，请稍后保存。") }
         web.endEditing(true)
         return try await web.evaluateJavaScript("flushNote()") as? String
+    }
+    func applyTable(_ source: String) async throws {
+        guard ready, let web else { throw UserFacingError(message: "编辑器正在准备，请稍后保存。") }
+        let html = try MarkdownTable.html(from: source)
+        let encoded = Data(html.utf8).base64EncodedString()
+        guard try await web.evaluateJavaScript("applyTable('\(encoded)')") as? Bool == true else {
+            throw UserFacingError(message: "正文已发生变化，请关闭表格编辑后重新打开。")
+        }
     }
 }
 
@@ -41,6 +56,7 @@ struct NoteWebView: UIViewRepresentable {
         configuration.websiteDataStore = Self.dataStore
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         configuration.userContentController.add(coordinator, name: "edited")
+        configuration.userContentController.add(coordinator, name: "table")
         configuration.setURLSchemeHandler(coordinator, forURLScheme: "trilium-resource")
         let web = NoteEditorWebView(frame: .zero, configuration: configuration)
         web.inputAssistantItem.leadingBarButtonGroups = []
@@ -74,6 +90,7 @@ struct NoteWebView: UIViewRepresentable {
             coordinator.parent.bridge.web = nil
         }
         web.configuration.userContentController.removeScriptMessageHandler(forName: "edited")
+        web.configuration.userContentController.removeScriptMessageHandler(forName: "table")
         coordinator.cancelResourceTasks()
         coordinator.navigation = nil
         coordinator.web = nil
@@ -173,6 +190,11 @@ struct NoteWebView: UIViewRepresentable {
             }
         }
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            if message.name == "table", parent.editing, let draft = message.body as? [String: String] {
+                parent.bridge.tableDraft = .init(source: draft["source"] ?? MarkdownTable.template,
+                                               error: draft["error"], isNew: draft["source"] == nil)
+                return
+            }
             guard parent.editing, let value = message.body as? String else { return }
             applied = value
             parent.onChange(value)
@@ -225,7 +247,11 @@ struct NoteWebView: UIViewRepresentable {
     private static let document = """
     <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=5">
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src trilium-resource: data:;">
-    <style>:root{color-scheme:light dark}body{font:17px -apple-system,BlinkMacSystemFont,sans-serif;line-height:1.65;margin:20px;color:#1c1c1e;background:#fff;overflow-wrap:anywhere}@media(prefers-color-scheme:dark){body{color:#f2f2f7;background:#1c1c1e}}#note{outline:none;min-height:75vh}img{max-width:100%;height:auto}table{max-width:100%;display:block;overflow:auto;border-collapse:collapse}td,th{border:1px solid #8885;padding:8px}pre{overflow:auto;background:#8881;padding:12px;border-radius:10px}blockquote{border-left:3px solid #00a99d;margin-left:0;padding-left:16px}a{color:#009e92}h1,h2,h3{line-height:1.3}input{pointer-events:none}
+    <style>:root{color-scheme:light dark}body{font:17px -apple-system,BlinkMacSystemFont,sans-serif;line-height:1.65;margin:20px;color:#1c1c1e;background:#fff;overflow-wrap:anywhere}@media(prefers-color-scheme:dark){body{color:#f2f2f7;background:#1c1c1e}}#note{outline:none;min-height:75vh}img{max-width:100%;height:auto}pre{overflow:auto;background:#8881;padding:12px;border-radius:10px}blockquote{border-left:3px solid #00a99d;margin-left:0;padding-left:16px}a{color:#009e92}h1,h2,h3{line-height:1.3}input{pointer-events:none}
+    #note figure.table{display:block!important;width:100%!important;max-width:100%!important;margin:16px 0!important;box-sizing:border-box}
+    #note table{display:table!important;width:100%!important;max-width:100%!important;margin-inline:0!important;border-collapse:collapse;table-layout:fixed}
+    #note col,#note th,#note td{width:auto!important}
+    #note td,#note th{border:1px solid #8885;padding:8px;overflow-wrap:anywhere;white-space:normal!important;vertical-align:top}
     #note ul{padding-inline-start:0}
     #note li ul{padding-inline-start:1.5em}
     code{font-family:ui-monospace,monospace;background:#8881;border-radius:4px;padding:2px 4px}pre code{background:none;padding:0}
@@ -269,7 +295,7 @@ struct NoteWebView: UIViewRepresentable {
       }
     }
     const editorHistory=new EditorHistory();
-    const note=document.getElementById('note');let timer;let selection;let modified=false;let rendered='';let executingCommand=false;let composing=false;
+    const note=document.getElementById('note');let timer;let selection;let modified=false;let rendered='';let executingCommand=false;let composing=false;let tableEdit;
     document.addEventListener('selectionchange',()=>{const s=getSelection();if(s.rangeCount&&note.contains(s.anchorNode))selection=s.getRangeAt(0).cloneRange()});
     function sanitize(html){const t=document.createElement('template');t.innerHTML=html;
       t.content.querySelectorAll('script,style,iframe,object,embed,link,meta,base,form').forEach(e=>e.remove());
@@ -277,7 +303,7 @@ struct NoteWebView: UIViewRepresentable {
         if(e.hasAttribute('href')){const h=e.getAttribute('href').trim();if(!/^(https?:|mailto:|#|\\/)/i.test(h))e.removeAttribute('href')}
         if(e.tagName==='IMG'){const src=e.getAttribute('src')||'';e.setAttribute('data-trilium-original-src',src);e.setAttribute('data-trilium-original-alt',JSON.stringify(e.getAttribute('alt')));const match=src.match(/(?:^|\\/)api\\/(images|attachments)\\/([^/]+)\\//);if(match){e.src='trilium-resource://local/'+(match[1]==='images'?'notes':'attachments')+'/'+encodeURIComponent(match[2])+'/content'}else if(!/^data:image\\/(png|jpeg|gif|webp);base64,/i.test(src)){e.removeAttribute('src');e.alt=e.alt||'外部图片未加载'}}
       });return t.innerHTML}
-    function setNote(encoded,editing){clearTimeout(timer);note.innerHTML=sanitize(new TextDecoder().decode(Uint8Array.from(atob(encoded),c=>c.charCodeAt(0))));note.contentEditable=editing?'true':'false';note.querySelectorAll('.todo-list input[type=checkbox]').forEach(e=>e.disabled=!editing);selection=null;modified=false;composing=false;rendered=note.innerHTML;editorHistory.reset(rendered);}
+    function setNote(encoded,editing){clearTimeout(timer);tableEdit=null;note.innerHTML=sanitize(new TextDecoder().decode(Uint8Array.from(atob(encoded),c=>c.charCodeAt(0))));note.contentEditable=editing?'true':'false';note.querySelectorAll('.todo-list input[type=checkbox]').forEach(e=>e.disabled=!editing);selection=null;modified=false;composing=false;rendered=note.innerHTML;editorHistory.reset(rendered);}
     function exportHTML(){const t=note.cloneNode(true);t.querySelectorAll('img').forEach(e=>{const src=e.getAttribute('data-trilium-original-src');if(src!==null)e.setAttribute('src',src);const alt=e.getAttribute('data-trilium-original-alt');if(alt!==null){const original=JSON.parse(alt);if(original===null)e.removeAttribute('alt');else e.setAttribute('alt',original)}e.removeAttribute('data-trilium-original-src');e.removeAttribute('data-trilium-original-alt')});t.querySelectorAll('.todo-list input[type=checkbox]').forEach(e=>e.setAttribute('disabled','disabled'));return t.innerHTML;}
     function flushNote(){note.blur();return modified||note.innerHTML!==rendered?exportHTML():null}
     function elementAtCaret(){const node=getSelection()?.anchorNode;return node?.nodeType===Node.ELEMENT_NODE?node:node?.parentElement}
@@ -381,6 +407,72 @@ struct NoteWebView: UIViewRepresentable {
       [...list.children].forEach(item=>{const label=[...item.children].find(e=>e.matches('label.todo-list__label'));const text=label?.querySelector('.todo-list__label__description');if(text)label.replaceWith(...text.childNodes)});
       return list;
     }
+    function tableMarkdown(table){
+      if(table.querySelector('table,caption')||[...table.querySelectorAll('td,th')].some(cell=>cell.colSpan!==1||cell.rowSpan!==1))
+        throw new Error('含合并单元格、嵌套表格或标题的表格请使用 HTML 源码编辑。');
+      const escape=text=>text.replace(/([\\\\`*_{}\\[\\]()#+.!~<>|])/g,'\\\\$1');
+      function inline(node){
+        if(node.nodeType===Node.TEXT_NODE)return escape(node.textContent);
+        if(node.nodeType!==Node.ELEMENT_NODE)return '';
+        if(node.hasAttribute('style')||node.hasAttribute('class'))
+          throw new Error('含特殊单元格格式的表格请使用 HTML 源码编辑，以保留原格式。');
+        const text=()=>[...node.childNodes].map(inline).join('');
+        switch(node.tagName){
+          case 'P':return text()+'<br>';
+          case 'BR':return '<br>';
+          case 'B':case 'STRONG':return '**'+text()+'**';
+          case 'I':case 'EM':return '*'+text()+'*';
+          case 'S':case 'DEL':case 'STRIKE':return '~~'+text()+'~~';
+          case 'CODE':{
+            const value=node.textContent;const ticks='`'.repeat(Math.max(0,...[...value.matchAll(/`+/g)].map(match=>match[0].length))+1);
+            const padding=/^ *$/.test(value)?'':' ';
+            return ticks+padding+value.replace(/\\|/g,'\\\\|')+padding+ticks;
+          }
+          case 'A':return '['+text()+']('+((node.getAttribute('href')||'').replace(/[\\\\()|]/g,character=>'\\\\'+character))+')';
+          default:throw new Error('此表格包含 Markdown 无法保留的内容，请使用 HTML 源码编辑。');
+        }
+      }
+      const rows=[...table.rows];
+      if(!rows.length)throw new Error('空表格请使用 HTML 源码编辑。');
+      const width=rows[0].cells.length;
+      if(!width||rows.some(row=>row.cells.length!==width))throw new Error('列数不一致的表格请使用 HTML 源码编辑。');
+      const alignment=cell=>cell.style.textAlign||cell.getAttribute('align')||'';
+      for(const row of rows)for(const [index,cell] of [...row.cells].entries()){
+        if(cell.hasAttribute('class')||[...cell.style].some(property=>!['text-align','width'].includes(property))||
+           (alignment(cell)&&alignment(cell)!==alignment(rows[0].cells[index])))
+          throw new Error('含特殊单元格格式的表格请使用 HTML 源码编辑，以保留原格式。');
+      }
+      const rowText=row=>'| '+[...row.cells].map(cell=>{
+        const children=[...cell.childNodes];let value=children.map(inline).join('');
+        if(children.at(-1)?.nodeName==='P')value=value.replace(/<br>$/,'');
+        return value.replace(/[\\r\\n]+/g,' ');
+      }).join(' | ')+' |';
+      const delimiters=[...rows[0].cells].map(cell=>{
+        const value=alignment(cell);
+        return value==='center'?':---:':value==='right'?'---:':value==='left'?':---':'---';
+      });
+      return [rowText(rows[0]),'| '+delimiters.join(' | ')+' |',...rows.slice(1).map(rowText)].join('\\n');
+    }
+    function editTable(){
+      const table=elementAtCaret()?.closest('table');
+      tableEdit={table:table&&note.contains(table)?table:null,range:getSelection().getRangeAt(0).cloneRange(),html:note.innerHTML};
+      try{window.webkit.messageHandlers.table.postMessage(tableEdit.table?{source:tableMarkdown(tableEdit.table)}:{})}
+      catch(error){tableEdit=null;window.webkit.messageHandlers.table.postMessage({error:error.message})}
+    }
+    function applyTable(encoded){
+      if(!note.isContentEditable||!tableEdit||note.innerHTML!==tableEdit.html)return false;
+      const draft=tableEdit;const html=sanitize(new TextDecoder().decode(Uint8Array.from(atob(encoded),c=>c.charCodeAt(0))));
+      note.focus();selectRange(draft.range);editorHistory.capture(bookmarkSelection());
+      let restoreCaret;
+      if(draft.table){restoreCaret=replaceBlock(draft.table,html,'td,th')}
+      else{
+        // Insert a block beside the current paragraph rather than nesting a table inside it.
+        const block=elementAtCaret()?.closest('p,h1,h2,h3,h4,h5,h6,pre');
+        if(block&&note.contains(block)){const range=document.createRange();range.setStartAfter(block);range.collapse(true);selectRange(range)}
+        restoreCaret=insertHTML(html+'<p><br></p>','td,th');
+      }
+      tableEdit=null;finishEdit(restoreCaret);return true;
+    }
     function taskList(){
       const range=getSelection().getRangeAt(0);const existing=elementAtCaret()?.closest('ul,ol');
       const list=document.createElement('ul');let block;
@@ -446,6 +538,7 @@ struct NoteWebView: UIViewRepresentable {
       if(!getSelection().rangeCount){const range=document.createRange();range.selectNodeContents(note);range.collapse(false);selectRange(range)}
       editorHistory.capture(bookmarkSelection());
       if(name==='undo'||name==='redo'){restoreHistory(name==='undo'?-1:1);return}
+      if(name==='editTable'){editTable();return}
       let restoreCaret;
       if(name==='inlineCode')restoreCaret=inlineCode();
       else if(name==='taskList')restoreCaret=taskList();

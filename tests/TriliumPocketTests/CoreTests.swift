@@ -130,6 +130,59 @@ final class CoreTests: XCTestCase {
     }
 
     @MainActor
+    func testMarkdownTableSupportsAlignmentAndNormalizesBodyColumnCounts() throws {
+        let html = try MarkdownTable.html(from: """
+        | 名称 | 容量 | 说明 |
+        | :--- | :---: | ---: |
+        | EFI | 500M |
+        | Windows | 100G | 系统 | ignored |
+        """)
+        XCTAssertTrue(html.contains("<th style=\"text-align:left\">名称</th>"))
+        XCTAssertTrue(html.contains("<th style=\"text-align:center\">容量</th>"))
+        XCTAssertTrue(html.contains("<th style=\"text-align:right\">说明</th>"))
+        XCTAssertTrue(html.contains("<td style=\"text-align:right\"></td>"))
+        XCTAssertFalse(html.contains("ignored"))
+    }
+
+    @MainActor
+    func testMarkdownTablePreservesEscapedPipesAndInlineFormatting() throws {
+        let html = try MarkdownTable.html(from: """
+        Name | Value
+        --- | ---
+        **Bold** and *italic* | `a\\|b`
+        [Link](https://example.com) | ~~Deleted~~
+        """)
+        XCTAssertTrue(html.contains("<strong>Bold</strong>"))
+        XCTAssertTrue(html.contains("<em>italic</em>"))
+        XCTAssertTrue(html.contains("<code>a|b</code>"))
+        XCTAssertTrue(html.contains("<a href=\"https://example.com\">Link</a>"))
+        XCTAssertTrue(html.contains("<del>Deleted</del>"))
+    }
+
+    @MainActor
+    func testMarkdownTableDistinguishesLineBreaksFromLiteralAndCodeMarkup() throws {
+        let html = try MarkdownTable.html(from: """
+        | Break | Literal | Code |
+        | --- | --- | --- |
+        | First<br>Next | \\<br\\> | `<br>` |
+        """)
+        XCTAssertTrue(html.contains("<td>First<br>Next</td>"))
+        XCTAssertTrue(html.contains("<td>&lt;br&gt;</td>"))
+        XCTAssertTrue(html.contains("<code>&lt;br&gt;</code>"))
+    }
+
+    @MainActor
+    func testMarkdownTableRejectsMalformedHeadersAndUnsafeLinks() throws {
+        for source in ["", "| A |", "| A | B |\n| --- |", "| A |\n| invalid |", "| A |\n| --- |\n\n| B |"] {
+            XCTAssertThrowsError(try MarkdownTable.html(from: source))
+        }
+        let html = try MarkdownTable.html(from: "| A |\n| --- |\n| [Unsafe](javascript:alert) |")
+        XCTAssertFalse(html.contains("href="))
+        XCTAssertTrue(html.contains("Unsafe"))
+        XCTAssertNoThrow(try MarkdownTable.html(from: "| A |\n| --- |"))
+    }
+
+    @MainActor
     func testHTMLPreviewPreservesReadableBlocksAndExcludesExecutableText() async {
         let html = """
         <style>body { display: none; }</style><h2>Heading</h2><p>A &amp; B<br>Next &lt;line&gt;</p><script>alert('hidden')</script><ul><li>First</li><li>Second</li></ul>

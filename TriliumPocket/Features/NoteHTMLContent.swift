@@ -53,6 +53,9 @@ struct NoteHTMLContent: View {
                     .allowsHitTesting(false)
             }
         }
+        .sheet(item: $bridge.tableDraft) { draft in
+            MarkdownTableEditor(draft: draft, bridge: bridge)
+        }
         .task(id: rendererID) {
             // A failed WebKit bootstrap must not leave an unexplained blank screen.
             do { try await Task.sleep(for: .seconds(45)) } catch { return }
@@ -62,6 +65,63 @@ struct NoteHTMLContent: View {
                 bridge.isLoading = false
             }
         }
+    }
+}
+
+@MainActor
+private struct MarkdownTableEditor: View {
+    let draft: WebEditorBridge.TableDraft
+    @ObservedObject var bridge: WebEditorBridge
+    @Environment(\.dismiss) private var dismiss
+    @State private var source: String
+    @State private var error: String?
+    @State private var saving = false
+
+    init(draft: WebEditorBridge.TableDraft, bridge: WebEditorBridge) {
+        self.draft = draft
+        self.bridge = bridge
+        _source = State(initialValue: draft.source)
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 12) {
+                if let message = draft.error {
+                    Text(message).foregroundStyle(.secondary)
+                    Spacer()
+                } else {
+                    Text("使用 | 分隔列，第二行填写 ---；:---、:---:、---: 控制对齐，\\| 表示竖线。")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    TextEditor(text: $source)
+                        .font(.system(.body, design: .monospaced))
+                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                        .accessibilityLabel("Markdown 表格源码")
+                    if let error { Text(error).font(.footnote).foregroundStyle(.red) }
+                }
+            }
+            .padding()
+            .navigationTitle("Markdown 表格")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }.disabled(saving)
+                }
+                if draft.error == nil {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("应用") {
+                            if !draft.isNew && source == draft.source { dismiss(); return }
+                            saving = true
+                            Task {
+                                defer { saving = false }
+                                do { try await bridge.applyTable(source); dismiss() }
+                                catch { self.error = error.localizedDescription }
+                            }
+                        }.disabled(saving)
+                    }
+                }
+            }
+        }
+        .interactiveDismissDisabled(saving)
     }
 }
 
@@ -200,6 +260,7 @@ struct NoteEditorToolbar: View {
                     formatButton("列表", icon: "list.bullet", name: "insertUnorderedList")
                     formatButton("编号", icon: "list.number", name: "insertOrderedList")
                     formatButton("任务清单", icon: "checkmark.square", name: "taskList")
+                    formatButton("插入或编辑表格", icon: "tablecells", name: "editTable")
                     formatButton("增加缩进", icon: "increase.indent", name: "indent")
                     formatButton("减少缩进", icon: "decrease.indent", name: "outdent")
                     Menu {
