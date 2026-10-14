@@ -160,24 +160,59 @@ struct NoteEditorToolbar: View {
     @Binding var command: NoteWebView.EditorCommand?
     var formattingEnabled = true
     let onDismissKeyboard: () -> Void
+    @State private var showLinkEditor = false
+    @State private var linkURL = ""
 
     var body: some View {
         HStack(spacing: 8) {
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 4) {
+                HStack(spacing: 0) {
                     formatButton("撤销", icon: "arrow.uturn.backward", name: "undo")
                     formatButton("重做", icon: "arrow.uturn.forward", name: "redo")
-                    formatButton("列表", icon: "list.bullet", name: "insertUnorderedList")
-                    formatButton("编号", icon: "list.number", name: "insertOrderedList")
-                    formatButton("引用", icon: "text.quote", name: "formatBlock", value: "blockquote")
                     Menu {
-                        Button("标题") { run("formatBlock", value: "h2") }
+                        ForEach(1...3, id: \.self) { level in
+                            Button("\(level) 级标题") { run("formatBlock", value: "h\(level)") }
+                        }
                         Button("正文") { run("formatBlock", value: "p") }
                     } label: {
                         Image(systemName: "textformat.size").frame(width: 40, height: 44)
                     }.accessibilityLabel("标题与正文")
                     formatButton("加粗", icon: "bold", name: "bold")
                     formatButton("斜体", icon: "italic", name: "italic")
+                    formatButton("删除线", icon: "strikethrough", name: "strikeThrough")
+                    Menu {
+                        Button("黄色高亮") { run("hiliteColor", value: "#fff2a8") }
+                        Button("绿色高亮") { run("hiliteColor", value: "#c9f2d0") }
+                        Button("取消高亮") { run("hiliteColor", value: "transparent") }
+                    } label: {
+                        Image(systemName: "highlighter").frame(width: 40, height: 44)
+                    }.accessibilityLabel("文字高亮")
+                    Menu {
+                        Button("行内代码") { run("inlineCode") }
+                        Button("代码块") { run("formatBlock", value: "pre") }
+                    } label: {
+                        Image(systemName: "chevron.left.forwardslash.chevron.right").frame(width: 40, height: 44)
+                    }.accessibilityLabel("代码")
+                    formatButton("引用", icon: "text.quote", name: "formatBlock", value: "blockquote")
+                    Button { linkURL = ""; showLinkEditor = true } label: {
+                        Image(systemName: "link").frame(width: 40, height: 44)
+                    }.accessibilityLabel("插入链接")
+                    formatButton("列表", icon: "list.bullet", name: "insertUnorderedList")
+                    formatButton("编号", icon: "list.number", name: "insertOrderedList")
+                    formatButton("任务清单", icon: "checkmark.square", name: "taskList")
+                    formatButton("增加缩进", icon: "increase.indent", name: "indent")
+                    formatButton("减少缩进", icon: "decrease.indent", name: "outdent")
+                    Menu {
+                        Button("下划线") { run("underline") }
+                        Button("左对齐") { run("justifyLeft") }
+                        Button("居中对齐") { run("justifyCenter") }
+                        Button("右对齐") { run("justifyRight") }
+                        Button("插入分隔线") { run("insertHorizontalRule") }
+                        Button("移除链接") { run("unlink") }
+                        Button("清除文字格式") { run("removeFormat") }
+                    } label: {
+                        Image(systemName: "wrench").frame(width: 40, height: 44)
+                    }.accessibilityLabel("更多格式工具")
                 }.padding(.horizontal, 8)
             }
             .disabled(!formattingEnabled)
@@ -192,8 +227,28 @@ struct NoteEditorToolbar: View {
         .shadow(color: .black.opacity(0.06), radius: 12, y: 4)
         .padding(.horizontal, 8).padding(.vertical, 8)
         .background(Color(.systemBackground).opacity(0.95))
+        .alert("插入链接", isPresented: $showLinkEditor) {
+            TextField("https://example.com", text: $linkURL)
+                .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
+            Button("取消", role: .cancel) {}
+            Button("插入") {
+                if let value = validatedLink { run("createLink", value: value) }
+            }.disabled(!formattingEnabled || validatedLink == nil)
+        } message: {
+            Text("输入网页地址、mailto: 邮件地址或笔记内链接。选中文字时添加链接，未选中时插入地址。")
+        }
     }
 
+    private var validatedLink: String? {
+        let value = linkURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.hasPrefix("#") || value.hasPrefix("/") { return value }
+        guard let url = URLComponents(string: value), let scheme = url.scheme?.lowercased() else { return nil }
+        switch scheme {
+        case "http", "https": return url.host?.isEmpty == false ? value : nil
+        case "mailto": return url.path.isEmpty ? nil : value
+        default: return nil
+        }
+    }
     private func formatButton(_ title: String, icon: String, name: String, value: String? = nil) -> some View {
         Button { run(name, value: value) } label: {
             Image(systemName: icon).frame(width: 40, height: 44)

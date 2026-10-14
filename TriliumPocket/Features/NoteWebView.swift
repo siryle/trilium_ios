@@ -228,6 +228,10 @@ struct NoteWebView: UIViewRepresentable {
     <style>:root{color-scheme:light dark}body{font:17px -apple-system,BlinkMacSystemFont,sans-serif;line-height:1.65;margin:20px;color:#1c1c1e;background:#fff;overflow-wrap:anywhere}@media(prefers-color-scheme:dark){body{color:#f2f2f7;background:#1c1c1e}}#note{outline:none;min-height:75vh}img{max-width:100%;height:auto}table{max-width:100%;display:block;overflow:auto;border-collapse:collapse}td,th{border:1px solid #8885;padding:8px}pre{overflow:auto;background:#8881;padding:12px;border-radius:10px}blockquote{border-left:3px solid #00a99d;margin-left:0;padding-left:16px}a{color:#009e92}h1,h2,h3{line-height:1.3}input{pointer-events:none}
     #note ul{padding-inline-start:0}
     #note li ul{padding-inline-start:1.5em}
+    code{font-family:ui-monospace,monospace;background:#8881;border-radius:4px;padding:2px 4px}pre code{background:none;padding:0}
+    #note ul.todo-list{list-style:none}ul.todo-list>li{position:relative;padding-inline-start:26px}
+    .todo-list__label>input{position:absolute;inset-inline-start:0;top:5px;width:18px;height:18px;margin:0;accent-color:#009e92}
+    #note[contenteditable=true] .todo-list__label>input{pointer-events:auto}
     </style></head>
     <body><article id="note"></article><script>
     const note=document.getElementById('note');let timer;let selection;let modified=false;let rendered='';
@@ -238,13 +242,121 @@ struct NoteWebView: UIViewRepresentable {
         if(e.hasAttribute('href')){const h=e.getAttribute('href').trim();if(!/^(https?:|mailto:|#|\\/)/i.test(h))e.removeAttribute('href')}
         if(e.tagName==='IMG'){const src=e.getAttribute('src')||'';e.setAttribute('data-trilium-original-src',src);e.setAttribute('data-trilium-original-alt',JSON.stringify(e.getAttribute('alt')));const match=src.match(/(?:^|\\/)api\\/(images|attachments)\\/([^/]+)\\//);if(match){e.src='trilium-resource://local/'+(match[1]==='images'?'notes':'attachments')+'/'+encodeURIComponent(match[2])+'/content'}else if(!/^data:image\\/(png|jpeg|gif|webp);base64,/i.test(src)){e.removeAttribute('src');e.alt=e.alt||'外部图片未加载'}}
       });return t.innerHTML}
-    function setNote(encoded,editing){clearTimeout(timer);note.innerHTML=sanitize(new TextDecoder().decode(Uint8Array.from(atob(encoded),c=>c.charCodeAt(0))));note.contentEditable=editing?'true':'false';selection=null;modified=false;rendered=note.innerHTML;}
-    function exportHTML(){const t=note.cloneNode(true);t.querySelectorAll('img').forEach(e=>{const src=e.getAttribute('data-trilium-original-src');if(src!==null)e.setAttribute('src',src);const alt=e.getAttribute('data-trilium-original-alt');if(alt!==null){const original=JSON.parse(alt);if(original===null)e.removeAttribute('alt');else e.setAttribute('alt',original)}e.removeAttribute('data-trilium-original-src');e.removeAttribute('data-trilium-original-alt')});return t.innerHTML;}
+    function setNote(encoded,editing){clearTimeout(timer);note.innerHTML=sanitize(new TextDecoder().decode(Uint8Array.from(atob(encoded),c=>c.charCodeAt(0))));note.contentEditable=editing?'true':'false';note.querySelectorAll('.todo-list input[type=checkbox]').forEach(e=>e.disabled=!editing);selection=null;modified=false;rendered=note.innerHTML;}
+    function exportHTML(){const t=note.cloneNode(true);t.querySelectorAll('img').forEach(e=>{const src=e.getAttribute('data-trilium-original-src');if(src!==null)e.setAttribute('src',src);const alt=e.getAttribute('data-trilium-original-alt');if(alt!==null){const original=JSON.parse(alt);if(original===null)e.removeAttribute('alt');else e.setAttribute('alt',original)}e.removeAttribute('data-trilium-original-src');e.removeAttribute('data-trilium-original-alt')});t.querySelectorAll('.todo-list input[type=checkbox]').forEach(e=>e.setAttribute('disabled','disabled'));return t.innerHTML;}
     function flushNote(){note.blur();return modified||note.innerHTML!==rendered?exportHTML():null}
-    function changed(){modified=true;clearTimeout(timer);window.webkit.messageHandlers.edited.postMessage(exportHTML())}
+    function elementAtCaret(){const node=getSelection()?.anchorNode;return node?.nodeType===Node.ELEMENT_NODE?node:node?.parentElement}
+    function decorateTaskItem(item){
+      let label=[...item.children].find(e=>e.matches('label.todo-list__label'));
+      if(!label){
+        label=document.createElement('label');label.className='todo-list__label';
+        const box=document.createElement('input');box.type='checkbox';
+        const text=document.createElement('span');text.className='todo-list__label__description';
+        [...item.childNodes].filter(e=>!['UL','OL'].includes(e.nodeName)).forEach(e=>text.append(e));
+        if(!text.hasChildNodes())text.append(document.createElement('br'));
+        label.append(box,text);item.prepend(label);
+      }
+      let box=label.querySelector('input[type=checkbox]');
+      if(!box){box=document.createElement('input');box.type='checkbox';label.prepend(box)}
+      box.disabled=false;
+    }
+    function changed(event){
+      modified=true;clearTimeout(timer);
+      note.querySelectorAll('ul').forEach(list=>{
+        if([...list.children].some(item=>[...item.children].some(e=>e.matches('label.todo-list__label'))))list.classList.add('todo-list');
+      });
+      note.querySelectorAll('ul.todo-list>li').forEach(decorateTaskItem);
+      if(event?.inputType==='insertParagraph'){
+        const item=elementAtCaret()?.closest('ul.todo-list>li');const box=item?.querySelector('input[type=checkbox]');if(box)box.checked=false;
+      }
+      note.querySelectorAll('.todo-list input[type=checkbox]').forEach(e=>e.toggleAttribute('checked',e.checked));
+      window.webkit.messageHandlers.edited.postMessage(exportHTML());
+    }
     note.addEventListener('input',changed);note.addEventListener('blur',()=>{clearTimeout(timer);if(note.isContentEditable&&modified)window.webkit.messageHandlers.edited.postMessage(exportHTML())});
     note.addEventListener('paste',e=>{e.preventDefault();document.execCommand('insertText',false,e.clipboardData.getData('text/plain'));changed()});
-    function runCommand(name,value){note.focus();if(selection){const s=getSelection();s.removeAllRanges();s.addRange(selection)}document.execCommand(name,false,value);changed()}
+    function escapeHTML(text){const span=document.createElement('span');span.textContent=text;return span.innerHTML}
+    function selectRange(range){const s=getSelection();s.removeAllRanges();s.addRange(range)}
+    // Native editing transactions keep custom code and checklist insertions undoable.
+    function insertHTML(html,caretSelector){
+      const previous=new Set(caretSelector?note.querySelectorAll(caretSelector):[]);
+      document.execCommand('insertHTML',false,html);
+      const inserted=caretSelector?[...note.querySelectorAll(caretSelector)].filter(e=>!previous.has(e)).pop():null;
+      if(inserted){const range=document.createRange();range.selectNodeContents(inserted);range.collapse(false);selectRange(range)}
+      selection=getSelection().rangeCount?getSelection().getRangeAt(0).cloneRange():null;
+    }
+    function inlineCode(){
+      const range=getSelection().getRangeAt(0);const code=elementAtCaret()?.closest('code');
+      if(code&&!code.closest('pre')&&code.contains(range.endContainer)){range.selectNode(code);selectRange(range);insertHTML(code.innerHTML);return}
+      insertHTML('<code>'+(range.collapsed?'&#8203;':escapeHTML(range.toString()))+'</code>','code');
+    }
+    function plainTaskList(source,tag){
+      const list=document.createElement(tag);list.innerHTML=source.innerHTML;
+      [...list.children].forEach(item=>{const label=[...item.children].find(e=>e.matches('label.todo-list__label'));const text=label?.querySelector('.todo-list__label__description');if(text)label.replaceWith(...text.childNodes)});
+      return list;
+    }
+    function taskList(){
+      const range=getSelection().getRangeAt(0);const existing=elementAtCaret()?.closest('ul,ol');
+      const list=document.createElement('ul');
+      if(existing&&note.contains(existing)){
+        list.innerHTML=existing.innerHTML;range.selectNode(existing);selectRange(range);
+        if(existing.classList.contains('todo-list')){
+          insertHTML(plainTaskList(existing,'ul').outerHTML,'li');return;
+        }
+      }else{
+        const block=elementAtCaret()?.closest('p,div,h1,h2,h3,h4,h5,h6,pre');
+        const fragment=document.createElement('div');
+        if(range.collapsed&&block&&note.contains(block)){fragment.innerHTML=block.innerHTML;range.selectNode(block);selectRange(range)}
+        else fragment.append(range.cloneContents());
+        let item=document.createElement('li');
+        for(const child of [...fragment.childNodes]){
+          if(child.nodeType===Node.ELEMENT_NODE&&child.matches('p,div,h1,h2,h3,h4,h5,h6,pre')){
+            if(item.hasChildNodes()){list.append(item);item=document.createElement('li')}
+            const paragraph=document.createElement('li');paragraph.innerHTML=child.innerHTML;list.append(paragraph);
+          }else item.append(child);
+        }
+        if(item.hasChildNodes()||!list.hasChildNodes())list.append(item);
+      }
+      list.className='todo-list';[...list.children].forEach(decorateTaskItem);
+      insertHTML(list.outerHTML,'.todo-list__label__description');
+    }
+    note.addEventListener('beforeinput',event=>{
+      if(event.inputType!=='insertParagraph'||event.isComposing||!note.isContentEditable)return;
+      const item=elementAtCaret()?.closest('ul.todo-list>li');const text=item?.querySelector('.todo-list__label__description');
+      if(!item||!text||text.textContent.trim()||item.querySelector('img,hr,ul,ol')||item!==item.parentElement.lastElementChild)return;
+      event.preventDefault();const list=item.parentElement;const remaining=list.cloneNode(true);remaining.lastElementChild.remove();
+      const range=document.createRange();range.selectNode(list);selectRange(range);
+      insertHTML((remaining.children.length?remaining.outerHTML:'')+'<p><br></p>','p');changed();
+    });
+    note.addEventListener('click',event=>{
+      if(!(event.target instanceof Element))return;
+      const box=event.target.closest('.todo-list input[type=checkbox]');
+      if(!note.isContentEditable)return;
+      if(!box){if(event.target.closest('label.todo-list__label'))event.preventDefault();return}
+      event.preventDefault();const replacement=box.cloneNode();replacement.toggleAttribute('checked',!box.hasAttribute('checked'));
+      const range=document.createRange();range.selectNode(box);selectRange(range);
+      insertHTML(replacement.outerHTML);
+      const text=elementAtCaret()?.closest('li')?.querySelector('.todo-list__label__description');
+      if(text){range.selectNodeContents(text);range.collapse(false);selectRange(range)}
+      selection=getSelection().rangeCount?getSelection().getRangeAt(0).cloneRange():null;changed();
+    });
+    function runCommand(name,value){
+      if(!note.isContentEditable)return;
+      const saved=selection;note.focus();
+      if(saved&&note.contains(saved.commonAncestorContainer))selectRange(saved);
+      if(!getSelection().rangeCount){const range=document.createRange();range.selectNodeContents(note);range.collapse(false);selectRange(range)}
+      if(name==='inlineCode')inlineCode();
+      else if(name==='taskList')taskList();
+      else if(['insertUnorderedList','insertOrderedList'].includes(name)&&elementAtCaret()?.closest('ul.todo-list')){
+        const list=elementAtCaret().closest('ul.todo-list');const range=document.createRange();range.selectNode(list);selectRange(range);
+        insertHTML(plainTaskList(list,name==='insertOrderedList'?'ol':'ul').outerHTML,'li');
+      }
+      else if(name==='createLink'){
+        if(typeof value!=='string'||!/^(https?:|mailto:|#|\\/)/i.test(value.trim()))return;
+        if(getSelection().isCollapsed){const link=document.createElement('a');link.setAttribute('href',value);link.textContent=value;insertHTML(link.outerHTML)}
+        else document.execCommand(name,false,value);
+      }else document.execCommand(name,false,value);
+      selection=getSelection().rangeCount?getSelection().getRangeAt(0).cloneRange():null;changed();
+    }
     </script></body></html>
     """
 }

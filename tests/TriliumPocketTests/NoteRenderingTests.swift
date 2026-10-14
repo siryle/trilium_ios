@@ -34,6 +34,174 @@ final class NoteRenderingTests: XCTestCase {
     }
 
     @MainActor
+    func testInlineCodeEscapesSelectedTextAndSupportsUndoRedo() async throws {
+        let renderer = try Renderer(content: "<p>&lt;tag&gt; &amp; 中文</p>", editing: true)
+        defer { renderer.close() }
+        try await waitForRender(renderer.bridge)
+        try await selectContents("p", in: renderer.web)
+
+        _ = try await renderer.web.evaluateJavaScript("runCommand('inlineCode'); true")
+        let code = try await renderer.web.evaluateJavaScript("note.querySelector('code')?.textContent")
+        XCTAssertEqual(code as? String, "<tag> & 中文")
+        let tagCount = try await renderer.web.evaluateJavaScript("note.querySelectorAll('tag').length")
+        XCTAssertEqual((tagCount as? NSNumber)?.intValue, 0)
+
+        _ = try await renderer.web.evaluateJavaScript("runCommand('undo'); true")
+        let undone = try await renderer.web.evaluateJavaScript("note.querySelector('code') === null && note.textContent === '<tag> & 中文'")
+        XCTAssertEqual(undone as? Bool, true)
+        _ = try await renderer.web.evaluateJavaScript("runCommand('redo'); true")
+        let redone = try await renderer.web.evaluateJavaScript("note.querySelector('code')?.textContent")
+        XCTAssertEqual(redone as? String, "<tag> & 中文")
+    }
+
+    @MainActor
+    func testStrikethroughAndHighlightPreserveSelectedText() async throws {
+        let renderer = try Renderer(content: "<p>需要标记的文字</p>", editing: true)
+        defer { renderer.close() }
+        try await waitForRender(renderer.bridge)
+        try await selectContents("p", in: renderer.web)
+
+        _ = try await renderer.web.evaluateJavaScript("runCommand('strikeThrough'); runCommand('hiliteColor', '#fff2a8'); true")
+        let result = try await renderer.web.evaluateJavaScript("""
+        (() => {
+          const walker = document.createTreeWalker(note, NodeFilter.SHOW_TEXT);
+          const text = walker.nextNode(); let element = text.parentElement;
+          let strike = false; let highlighted = false;
+          while (element && element !== note) {
+            const style = getComputedStyle(element);
+            strike ||= style.textDecorationLine.includes('line-through');
+            highlighted ||= style.backgroundColor === 'rgb(255, 242, 168)';
+            element = element.parentElement;
+          }
+          return { text: note.textContent, strike, highlighted };
+        })()
+        """)
+        let values = try XCTUnwrap(result as? [String: Any])
+        XCTAssertEqual(values["text"] as? String, "需要标记的文字")
+        XCTAssertEqual(values["strike"] as? Bool, true)
+        XCTAssertEqual(values["highlighted"] as? Bool, true)
+    }
+
+    @MainActor
+    func testLinkCommandRestoresSelectionAfterNativeDialogAndRejectsScriptURLs() async throws {
+        let renderer = try Renderer(content: "<p>选中的文字</p>", editing: true)
+        defer { renderer.close() }
+        try await waitForRender(renderer.bridge)
+        try await selectContents("p", in: renderer.web)
+
+        // A native URL prompt takes focus away from the web editor.
+        _ = try await renderer.web.evaluateJavaScript("""
+        note.blur(); getSelection().removeAllRanges();
+        runCommand('createLink', 'https://example.com/?a=1&b=2'); true
+        """)
+        let link = try await renderer.web.evaluateJavaScript("""
+        (() => { const link = note.querySelector('a'); return { text: link?.textContent, href: link?.getAttribute('href') }; })()
+        """)
+        let values = try XCTUnwrap(link as? [String: Any])
+        XCTAssertEqual(values["text"] as? String, "选中的文字")
+        XCTAssertEqual(values["href"] as? String, "https://example.com/?a=1&b=2")
+
+        let before = try await renderer.web.evaluateJavaScript("note.innerHTML") as? String
+        _ = try await renderer.web.evaluateJavaScript("runCommand('createLink', 'javascript:alert(1)'); true")
+        let after = try await renderer.web.evaluateJavaScript("note.innerHTML") as? String
+        XCTAssertEqual(after, before)
+    }
+
+    @MainActor
+    func testTaskListCheckStateSurvivesExportAndReadOnlyReload() async throws {
+        let renderer = try Renderer(content: "<p><strong>待办事项</strong></p>", editing: true)
+        defer { renderer.close() }
+        try await waitForRender(renderer.bridge)
+        try await selectContents("p", in: renderer.web)
+
+        _ = try await renderer.web.evaluateJavaScript("runCommand('taskList'); true")
+        let formatting = try await renderer.web.evaluateJavaScript("note.querySelector('.todo-list__label__description strong')?.textContent")
+        XCTAssertEqual(formatting as? String, "待办事项")
+        _ = try await renderer.web.evaluateJavaScript("note.querySelector('.todo-list input').click(); true")
+        let exported = try await renderer.bridge.flush()
+        let content = try XCTUnwrap(exported)
+        XCTAssertFalse(HTMLText.requiresSourceEditing(content))
+
+        let encoded = Data(content.utf8).base64EncodedString()
+        _ = try await renderer.web.evaluateJavaScript("setNote('\(encoded)', false); true")
+        let state = try await renderer.web.evaluateJavaScript("""
+        (() => { const box = note.querySelector('.todo-list input'); return { checked: box.checked, disabled: box.disabled, text: note.textContent }; })()
+        """)
+        let values = try XCTUnwrap(state as? [String: Any])
+        XCTAssertEqual(values["checked"] as? Bool, true)
+        XCTAssertEqual(values["disabled"] as? Bool, true)
+        XCTAssertEqual(values["text"] as? String, "待办事项")
+        let untouched = try await renderer.bridge.flush()
+        XCTAssertNil(untouched, "Reading a saved checklist must not rewrite its source.")
+    }
+
+    @MainActor
+    func testTaskListConvertsMultipleParagraphsAndTogglesBackWithoutLosingFormatting() async throws {
+        let renderer = try Renderer(content: "<p><strong>第一项</strong></p><p>第二项</p>", editing: true)
+        defer { renderer.close() }
+        try await waitForRender(renderer.bridge)
+        try await selectContents("#note", in: renderer.web)
+
+        _ = try await renderer.web.evaluateJavaScript("runCommand('taskList'); true")
+        let count = try await renderer.web.evaluateJavaScript("note.querySelectorAll('ul.todo-list > li').length")
+        XCTAssertEqual((count as? NSNumber)?.intValue, 2)
+        _ = try await renderer.web.evaluateJavaScript("runCommand('taskList'); true")
+        let result = try await renderer.web.evaluateJavaScript("""
+        ({ count: note.querySelectorAll('ul > li').length, tasks: note.querySelectorAll('input').length, bold: note.querySelector('strong')?.textContent, text: note.textContent })
+        """)
+        let values = try XCTUnwrap(result as? [String: Any])
+        XCTAssertEqual((values["count"] as? NSNumber)?.intValue, 2)
+        XCTAssertEqual((values["tasks"] as? NSNumber)?.intValue, 0)
+        XCTAssertEqual(values["bold"] as? String, "第一项")
+        XCTAssertEqual(values["text"] as? String, "第一项第二项")
+    }
+
+    @MainActor
+    func testEnterOnAnEmptyLastTaskReturnsToNormalParagraph() async throws {
+        let renderer = try Renderer(content: "", editing: true)
+        defer { renderer.close() }
+        try await waitForRender(renderer.bridge)
+        try await selectContents("#note", in: renderer.web)
+
+        _ = try await renderer.web.evaluateJavaScript("runCommand('taskList'); true")
+        _ = try await renderer.web.evaluateJavaScript("""
+        note.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertParagraph', bubbles: true, cancelable: true })); true
+        """)
+        let result = try await renderer.web.evaluateJavaScript("note.querySelector('ul') === null && note.querySelector('p') !== null")
+        XCTAssertEqual(result as? Bool, true)
+    }
+
+    @MainActor
+    func testTaskListCanBecomeANumberedListWithoutLosingText() async throws {
+        let renderer = try Renderer(content: "<p><em>待办事项</em></p>", editing: true)
+        defer { renderer.close() }
+        try await waitForRender(renderer.bridge)
+        try await selectContents("p", in: renderer.web)
+
+        _ = try await renderer.web.evaluateJavaScript("runCommand('taskList'); runCommand('insertOrderedList'); true")
+        let result = try await renderer.web.evaluateJavaScript("""
+        ({ numbered: note.querySelector('ol > li em')?.textContent, tasks: note.querySelectorAll('input').length })
+        """)
+        let values = try XCTUnwrap(result as? [String: Any])
+        XCTAssertEqual(values["numbered"] as? String, "待办事项")
+        XCTAssertEqual((values["tasks"] as? NSNumber)?.intValue, 0)
+    }
+
+    @MainActor
+    private func selectContents(_ selector: String, in web: WKWebView) async throws {
+        _ = try await web.evaluateJavaScript("""
+        (() => {
+          note.focus();
+          const element = document.querySelector('\(selector)');
+          const range = document.createRange(); range.selectNodeContents(element);
+          const current = getSelection(); current.removeAllRanges(); current.addRange(range);
+          document.dispatchEvent(new Event('selectionchange'));
+          return true;
+        })()
+        """)
+    }
+
+    @MainActor
     func testSanitizationRetainsTextWithoutExecutingUntrustedScript() async throws {
         let source = """
         <script>window.untrustedExecuted = true;</script>
