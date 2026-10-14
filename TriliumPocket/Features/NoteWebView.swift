@@ -1,5 +1,12 @@
 import SwiftUI
+import UIKit
 import WebKit
+
+@MainActor
+private final class NoteEditorWebView: WKWebView {
+    // The editor supplies its own formatting and keyboard dismissal controls.
+    override var inputAccessoryView: UIView? { nil }
+}
 
 @MainActor
 final class WebEditorBridge: ObservableObject {
@@ -35,7 +42,9 @@ struct NoteWebView: UIViewRepresentable {
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         configuration.userContentController.add(coordinator, name: "edited")
         configuration.setURLSchemeHandler(coordinator, forURLScheme: "trilium-resource")
-        let web = WKWebView(frame: .zero, configuration: configuration)
+        let web = NoteEditorWebView(frame: .zero, configuration: configuration)
+        web.inputAssistantItem.leadingBarButtonGroups = []
+        web.inputAssistantItem.trailingBarButtonGroups = []
         web.navigationDelegate = coordinator
         web.isOpaque = false; web.backgroundColor = .systemBackground
         web.scrollView.backgroundColor = .systemBackground
