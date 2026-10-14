@@ -154,6 +154,11 @@ final class NoteRenderingTests: XCTestCase {
         XCTAssertEqual((values["tasks"] as? NSNumber)?.intValue, 0)
         XCTAssertEqual(values["bold"] as? String, "第一项")
         XCTAssertEqual(values["text"] as? String, "第一项第二项")
+        try await assertUndoRedo(
+            in: renderer.web,
+            undone: "note.querySelectorAll('ul.todo-list > li input').length === 2 && note.querySelector('strong')?.textContent === '第一项'",
+            redone: "note.querySelectorAll('ul > li').length === 2 && note.querySelector('input') === null && note.textContent === '第一项第二项'"
+        )
     }
 
     @MainActor
@@ -169,6 +174,45 @@ final class NoteRenderingTests: XCTestCase {
         """)
         let result = try await renderer.web.evaluateJavaScript("note.querySelector('ul') === null && note.querySelector('p') !== null")
         XCTAssertEqual(result as? Bool, true)
+        try await assertUndoRedo(
+            in: renderer.web,
+            undone: "note.querySelector('ul.todo-list > li input') !== null",
+            redone: "note.querySelector('ul') === null && note.querySelector('p') !== null"
+        )
+    }
+
+    @MainActor
+    func testLeavingEmptyTaskPreservesPreviousTasksAndSurroundingParagraphs() async throws {
+        let renderer = try Renderer(content: """
+        <p>列表之前</p><ul class="todo-list">
+        <li><label class="todo-list__label"><input type="checkbox" checked><span class="todo-list__label__description"><strong>保留事项</strong></span></label></li>
+        <li><label class="todo-list__label"><input type="checkbox"><span class="todo-list__label__description"><br></span></label></li>
+        </ul><p>列表之后</p>
+        """, editing: true)
+        defer { renderer.close() }
+        try await waitForRender(renderer.bridge)
+        try await selectContents("li:last-child .todo-list__label__description", in: renderer.web)
+
+        _ = try await renderer.web.evaluateJavaScript("""
+        note.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertParagraph', bubbles: true, cancelable: true })); true
+        """)
+        let result = try await renderer.web.evaluateJavaScript("""
+        (() => {
+          const list = note.querySelector('ul.todo-list');
+          return list?.children.length === 1
+            && list.querySelector('input').checked
+            && list.querySelector('strong')?.textContent === '保留事项'
+            && note.firstElementChild.textContent === '列表之前'
+            && note.lastElementChild.textContent === '列表之后'
+            && list.nextElementSibling?.tagName === 'P'
+            && list.nextElementSibling.textContent === ''
+            && list.nextElementSibling.contains(getSelection().anchorNode);
+        })()
+        """)
+        XCTAssertEqual(result as? Bool, true)
+        let content = try await renderer.bridge.flush()
+        let exported = try XCTUnwrap(content)
+        XCTAssertFalse(exported.contains("contenteditable"), "Temporary replacement attributes must not leak into saved notes.")
     }
 
     @MainActor
@@ -185,6 +229,22 @@ final class NoteRenderingTests: XCTestCase {
         let values = try XCTUnwrap(result as? [String: Any])
         XCTAssertEqual(values["numbered"] as? String, "待办事项")
         XCTAssertEqual((values["tasks"] as? NSNumber)?.intValue, 0)
+        try await assertUndoRedo(
+            in: renderer.web,
+            undone: "note.querySelector('ul.todo-list > li em')?.textContent === '待办事项' && note.querySelectorAll('input').length === 1",
+            redone: "note.querySelector('ol > li em')?.textContent === '待办事项' && note.querySelector('input') === null"
+        )
+    }
+
+    @MainActor
+    private func assertUndoRedo(in web: WKWebView, undone: String, redone: String,
+                               file: StaticString = #filePath, line: UInt = #line) async throws {
+        _ = try await web.evaluateJavaScript("runCommand('undo'); true")
+        let undoResult = try await web.evaluateJavaScript("(\(undone)) && note.querySelector('[contenteditable]') === null")
+        XCTAssertEqual(undoResult as? Bool, true, "Undo must restore editable list content.", file: file, line: line)
+        _ = try await web.evaluateJavaScript("runCommand('redo'); true")
+        let redoResult = try await web.evaluateJavaScript("(\(redone)) && note.querySelector('[contenteditable]') === null")
+        XCTAssertEqual(redoResult as? Bool, true, "Redo must restore the converted content.", file: file, line: line)
     }
 
     @MainActor

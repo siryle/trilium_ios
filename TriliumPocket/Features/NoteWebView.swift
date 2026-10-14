@@ -284,6 +284,16 @@ struct NoteWebView: UIViewRepresentable {
       if(inserted){const range=document.createRange();range.selectNodeContents(inserted);range.collapse(false);selectRange(range)}
       selection=getSelection().rangeCount?getSelection().getRangeAt(0).cloneRange():null;
     }
+    function replaceBlock(block,html,caretSelector){
+      // Treat the old block as atomic so native insertion cannot retain or merge its list markup.
+      const editable=block.getAttribute('contenteditable');block.contentEditable='false';
+      const range=document.createRange();range.selectNode(block);selectRange(range);
+      try{insertHTML(html,caretSelector)}
+      finally{
+        // Undo restores this same node, which must remain editable.
+        if(editable===null)block.removeAttribute('contenteditable');else block.setAttribute('contenteditable',editable);
+      }
+    }
     function inlineCode(){
       const range=getSelection().getRangeAt(0);const code=elementAtCaret()?.closest('code');
       if(code&&!code.closest('pre')&&code.contains(range.endContainer)){range.selectNode(code);selectRange(range);insertHTML(code.innerHTML);return}
@@ -298,9 +308,9 @@ struct NoteWebView: UIViewRepresentable {
       const range=getSelection().getRangeAt(0);const existing=elementAtCaret()?.closest('ul,ol');
       const list=document.createElement('ul');
       if(existing&&note.contains(existing)){
-        list.innerHTML=existing.innerHTML;range.selectNode(existing);selectRange(range);
+        list.innerHTML=existing.innerHTML;
         if(existing.classList.contains('todo-list')){
-          insertHTML(plainTaskList(existing,'ul').outerHTML,'li');return;
+          replaceBlock(existing,plainTaskList(existing,'ul').outerHTML,'li');return;
         }
       }else{
         const block=elementAtCaret()?.closest('p,div,h1,h2,h3,h4,h5,h6,pre');
@@ -317,15 +327,15 @@ struct NoteWebView: UIViewRepresentable {
         if(item.hasChildNodes()||!list.hasChildNodes())list.append(item);
       }
       list.className='todo-list';[...list.children].forEach(decorateTaskItem);
-      insertHTML(list.outerHTML,'.todo-list__label__description');
+      if(existing&&note.contains(existing))replaceBlock(existing,list.outerHTML,'.todo-list__label__description');
+      else insertHTML(list.outerHTML,'.todo-list__label__description');
     }
     note.addEventListener('beforeinput',event=>{
       if(event.inputType!=='insertParagraph'||event.isComposing||!note.isContentEditable)return;
       const item=elementAtCaret()?.closest('ul.todo-list>li');const text=item?.querySelector('.todo-list__label__description');
       if(!item||!text||text.textContent.trim()||item.querySelector('img,hr,ul,ol')||item!==item.parentElement.lastElementChild)return;
       event.preventDefault();const list=item.parentElement;const remaining=list.cloneNode(true);remaining.lastElementChild.remove();
-      const range=document.createRange();range.selectNode(list);selectRange(range);
-      insertHTML((remaining.children.length?remaining.outerHTML:'')+'<p><br></p>','p');changed();
+      replaceBlock(list,(remaining.children.length?remaining.outerHTML:'')+'<p><br></p>','p');changed();
     });
     note.addEventListener('click',event=>{
       if(!(event.target instanceof Element))return;
@@ -347,8 +357,8 @@ struct NoteWebView: UIViewRepresentable {
       if(name==='inlineCode')inlineCode();
       else if(name==='taskList')taskList();
       else if(['insertUnorderedList','insertOrderedList'].includes(name)&&elementAtCaret()?.closest('ul.todo-list')){
-        const list=elementAtCaret().closest('ul.todo-list');const range=document.createRange();range.selectNode(list);selectRange(range);
-        insertHTML(plainTaskList(list,name==='insertOrderedList'?'ol':'ul').outerHTML,'li');
+        const list=elementAtCaret().closest('ul.todo-list');
+        replaceBlock(list,plainTaskList(list,name==='insertOrderedList'?'ol':'ul').outerHTML,'li');
       }
       else if(name==='createLink'){
         if(typeof value!=='string'||!/^(https?:|mailto:|#|\\/)/i.test(value.trim()))return;
