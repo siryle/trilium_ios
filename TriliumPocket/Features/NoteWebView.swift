@@ -383,16 +383,19 @@ struct NoteWebView: UIViewRepresentable {
     }
     function taskList(){
       const range=getSelection().getRangeAt(0);const existing=elementAtCaret()?.closest('ul,ol');
-      const list=document.createElement('ul');
+      const list=document.createElement('ul');let block;
       if(existing&&note.contains(existing)){
         list.innerHTML=existing.innerHTML;
         if(existing.classList.contains('todo-list')){
           return replaceBlock(existing,plainTaskList(existing,'ul').outerHTML,'li');
         }
       }else{
-        const block=elementAtCaret()?.closest('p,div,h1,h2,h3,h4,h5,h6,pre');
+        const start=range.startContainer.nodeType===Node.ELEMENT_NODE?range.startContainer:range.startContainer.parentElement;
+        const candidate=start?.closest('p,div,h1,h2,h3,h4,h5,h6,pre');
+        if(candidate&&note.contains(candidate)&&candidate.contains(range.endContainer))block=candidate;
         const fragment=document.createElement('div');
-        if(range.collapsed&&block&&note.contains(block)){fragment.innerHTML=block.innerHTML;range.selectNode(block);selectRange(range)}
+        // List commands apply to the whole paragraph. Native insertion can discard its active inline formatting.
+        if(block)fragment.innerHTML=block.innerHTML;
         else fragment.append(range.cloneContents());
         let item=document.createElement('li');
         for(const child of [...fragment.childNodes]){
@@ -405,6 +408,7 @@ struct NoteWebView: UIViewRepresentable {
       }
       list.className='todo-list';[...list.children].forEach(decorateTaskItem);
       if(existing&&note.contains(existing))return replaceBlock(existing,list.outerHTML,'.todo-list__label__description');
+      if(block)return replaceBlock(block,list.outerHTML,'.todo-list__label__description');
       return insertHTML(list.outerHTML,'.todo-list__label__description');
     }
     note.addEventListener('beforeinput',event=>{

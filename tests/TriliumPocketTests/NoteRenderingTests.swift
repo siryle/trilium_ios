@@ -288,16 +288,18 @@ final class NoteRenderingTests: XCTestCase {
 
         let initial = try await renderer.web.evaluateJavaScript("note.innerHTML") as? String
         var snapshots = [try XCTUnwrap(initial)]
-        for command in ["runCommand('bold')", "runCommand('taskList')",
-                        "runCommand('insertOrderedList')", "runCommand('insertText', '追加')"] {
+        let commands = [
+            ("runCommand('bold')", "note.querySelector('p b, p strong')?.textContent === '中文任务'"),
+            ("runCommand('taskList')", "note.querySelector('.todo-list__label__description b, .todo-list__label__description strong')?.textContent === '中文任务'"),
+            ("runCommand('insertOrderedList')", "note.querySelector('ol li b, ol li strong')?.textContent === '中文任务' && note.querySelector('input') === null"),
+            ("runCommand('insertText', '追加')", "note.querySelector('ol li')?.textContent === '中文任务追加' && note.querySelector('b, strong') !== null && note.querySelector('input') === null")
+        ]
+        for (command, condition) in commands {
             _ = try await renderer.web.evaluateJavaScript("\(command); true")
+            try await assertEditorState(condition, in: renderer.web)
             let snapshot = try await renderer.web.evaluateJavaScript("note.innerHTML") as? String
             snapshots.append(try XCTUnwrap(snapshot))
         }
-        try await assertEditorState(
-            "note.querySelector('ol li')?.textContent === '中文任务追加' && note.querySelector('b, strong') !== null && note.querySelector('input') === null",
-            in: renderer.web
-        )
         for expected in snapshots.dropLast().reversed() {
             _ = try await renderer.web.evaluateJavaScript("runCommand('undo'); true")
             let actual = try await renderer.web.evaluateJavaScript("note.innerHTML") as? String
@@ -308,6 +310,30 @@ final class NoteRenderingTests: XCTestCase {
             let actual = try await renderer.web.evaluateJavaScript("note.innerHTML") as? String
             XCTAssertEqual(actual, expected)
         }
+    }
+
+    @MainActor
+    func testTaskListPreservesWholeParagraphWhenOnlyPartOfItsTextIsSelected() async throws {
+        let renderer = try Renderer(content: "<p>列表之前</p><p>保留<strong>选中</strong>文字</p><p>列表之后</p>", editing: true)
+        defer { renderer.close() }
+        try await waitForRender(renderer.bridge)
+        try await selectContents("strong", in: renderer.web)
+
+        let before = try await renderer.web.evaluateJavaScript("note.innerHTML") as? String
+        _ = try await renderer.web.evaluateJavaScript("runCommand('taskList'); true")
+        let taskState = """
+        note.children.length === 3 && note.firstElementChild.textContent === '列表之前'
+          && note.lastElementChild.textContent === '列表之后'
+          && note.querySelector('.todo-list__label__description')?.textContent === '保留选中文字'
+          && note.querySelector('.todo-list__label__description strong')?.textContent === '选中'
+          && note.querySelector('.todo-list__label__description')?.contains(getSelection().anchorNode) === true
+        """
+        try await assertEditorState(taskState, in: renderer.web)
+        _ = try await renderer.web.evaluateJavaScript("runCommand('undo'); true")
+        let undone = try await renderer.web.evaluateJavaScript("note.innerHTML") as? String
+        XCTAssertEqual(undone, before)
+        _ = try await renderer.web.evaluateJavaScript("runCommand('redo'); true")
+        try await assertEditorState(taskState, in: renderer.web)
     }
 
     @MainActor
