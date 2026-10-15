@@ -259,7 +259,7 @@ struct NoteWebView: UIViewRepresentable {
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src trilium-resource: data:;">
     <style>:root{color-scheme:light dark}body{font:17px -apple-system,BlinkMacSystemFont,sans-serif;line-height:1.65;margin:20px;color:#1c1c1e;background:#fff;overflow-wrap:anywhere}@media(prefers-color-scheme:dark){body{color:#f2f2f7;background:#1c1c1e}}#note{outline:none;min-height:75vh}img{max-width:100%;height:auto}pre{overflow:auto;background:#8881;padding:12px;border-radius:10px}blockquote{border-left:3px solid #00a99d;margin-left:0;padding-left:16px}a{color:#009e92}h1,h2,h3{line-height:1.3}input{pointer-events:none}
     #note figure.table{display:block!important;width:100%!important;max-width:100%!important;margin:16px 0!important;box-sizing:border-box}
-    #note table{display:table!important;width:100%!important;max-width:100%!important;margin-inline:0!important;border-collapse:collapse;table-layout:fixed}
+    #note table{display:table!important;width:100%!important;max-width:100%!important;margin-inline:0!important;border-collapse:collapse;table-layout:auto!important}
     #note col,#note th,#note td{width:auto!important}
     #note td,#note th{border:1px solid #8885;padding:8px;overflow-wrap:anywhere;white-space:normal!important;vertical-align:top}
     #note ul,#note ol{padding-inline-start:2em;list-style-position:outside}
