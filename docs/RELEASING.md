@@ -9,7 +9,7 @@ TriliumPocket 是面向 iPhone 的原生 SwiftUI 应用，最低支持 iOS 17。
 1. 在 GitHub 创建一个仓库，并将当前代码（包含 `.github/workflows/ios-release.yml`）同步到它。可以保留 Gitea 作为 `origin`，另加名为 `github` 的 remote：`git remote add github https://github.com/<owner>/<repo>.git`。地址需要替换为实际仓库。
 2. 将代码推送至 GitHub 的 `main` 分支：`git push github main`。之后每次从 Gitea 更新代码，也需要同步到 GitHub。
 3. 在 GitHub 仓库 Settings → Actions → General 中启用 Actions，确保策略允许本工作流固定 SHA 的官方 `actions/checkout`、`actions/upload-artifact` 和 `actions/download-artifact`。若组织策略禁止写入 Releases，需要由仓库/组织管理员允许发布任务使用 `contents: write`。
-4. 不需要 Apple Developer 证书、描述文件、签名 secrets 或额外第三方访问令牌。工作流默认仅授予 `contents: read`；只有成功构建后的发布 job 获得 `contents: write`，并使用该 job 的 `GITHUB_TOKEN`。
+4. 不需要 Apple Developer 证书、描述文件、签名 secrets 或额外第三方访问令牌。工作流默认仅授予 `contents: read`；发布 job 获得 `contents: write`，清理 job 获得 `actions: write` 和 `contents: write`，均使用各自 job 的 `GITHUB_TOKEN`。
 
 ## CI 与发布入口
 
@@ -45,7 +45,16 @@ git push github v1.0.0
 - `COMMIT_SHA.txt`：实际经过测试并归档的源代码提交。
 - `SHA256SUMS.txt`：IPA 和提交记录文件的 SHA-256。
 
-下载所有附件到同一目录后可运行 `shasum -a 256 -c SHA256SUMS.txt`（macOS）或 `sha256sum -c SHA256SUMS.txt`（Linux）校验。Actions 同时保留构建产物、测试结果 `.xcresult` 和日志 7 天；Release 附件不受这项保留期限制。
+下载所有附件到同一目录后可运行 `shasum -a 256 -c SHA256SUMS.txt`（macOS）或 `sha256sum -c SHA256SUMS.txt`（Linux）校验。
+
+每次非 Pull Request 工作流结束后，清理任务按创建时间保留最近三次本工作流运行，删除更早的已完成运行及其产物、日志；正在运行或重新运行的任务会跳过。保留运行的 artifacts 仍受 7 天有效期限制。发布成功后，按发布时间保留最近三个包含本项目未签名 IPA 的 Release（包含预发布和已有 IPA 附件的草稿），删除更早的 Release 及全部附件，保留对应 Git 标签。发布失败时仅清理 Actions 历史，保留现有 IPA Release。清理任务在仓库内串行执行，Pull Request 不获得删除权限。
+
+已有历史记录也可通过本地已安装的 Ruby 和已登录的 GitHub CLI 清理，无需安装依赖。先预览，确认列表后使用 `--apply` 执行：
+
+```sh
+GH_REPO='owner/repo' ruby scripts/prune_releases.rb
+GH_REPO='owner/repo' ruby scripts/prune_releases.rb --apply
+```
 
 **这是未签名 IPA，不能直接在普通 iPhone 上安装或运行，也不属于 App Store/TestFlight 分发包。** 真实设备安装必须另行使用有效 Apple 身份和相应 provisioning profile 进行签名，并满足安装方式的授权条件。该仓库的工作流不配置 Apple 签名；不要将“下载成功”误认为“可以直接安装”。
 

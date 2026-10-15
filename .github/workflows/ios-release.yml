@@ -258,3 +258,33 @@ jobs:
             "release/TriliumPocket-${RELEASE_TAG}-unsigned.ipa" \
             release/SHA256SUMS.txt release/COMMIT_SHA.txt
           printf '### Published unsigned IPA\n\nRelease: https://github.com/%s/releases/tag/%s\n\nIPA: `TriliumPocket-%s-unsigned.ipa`\n' "$GH_REPO" "$RELEASE_TAG" "$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"
+
+  cleanup:
+    name: Retain the latest three workflow runs and IPA releases
+    if: always() && github.event_name != 'pull_request'
+    needs: [resolve, build, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: write
+    concurrency:
+      group: ios-retention-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Delete historical runs and release packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PUBLISHED: ${{ needs.publish.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruby scripts/check_release_retention.rb
+          options=(--apply)
+          if [[ "$PUBLISHED" != success ]]; then
+            options+=(--skip-releases)
+          fi
+          ruby scripts/prune_releases.rb "${options[@]}"
