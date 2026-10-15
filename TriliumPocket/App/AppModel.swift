@@ -21,6 +21,16 @@ final class AppModel: ObservableObject {
         return editor
     }
 
+    func isNoteDeleted(_ noteID: String) -> Bool { editors[noteID]?.deleted == true }
+
+    func didDeleteNote(_ noteID: String) {
+        if contextNote?.id == noteID {
+            contextNote = nil
+            contextContent = nil
+        }
+        changeVersion += 1
+    }
+
     init(client: APIClient? = nil) {
         injectedClient = client
         if let client {

@@ -135,4 +135,8 @@ struct APIClient {
         let body = try JSONSerialization.data(withJSONObject: ["title": title])
         _ = try await request("notes/\(id)", method: "PATCH", body: body)
     }
+    func deleteNote(_ id: String) async throws {
+        guard id != "root" else { throw UserFacingError(message: "不能删除根笔记。") }
+        _ = try await request("notes/\(id)", method: "DELETE")
+    }
 }

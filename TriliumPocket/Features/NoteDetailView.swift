@@ -10,6 +10,8 @@ final class NoteEditorModel: ObservableObject {
     @Published var sourceEditing = false
     @Published var loading = false
     @Published var saving = false
+    @Published private(set) var deleting = false
+    @Published private(set) var deleted = false
     @Published var failure: String?
     @Published var conflict = false
     @Published var draftWarning: String?
@@ -22,10 +24,11 @@ final class NoteEditorModel: ObservableObject {
     private var didLoad = false
     private var loadTask: Task<Void, Never>?
     private var ownsDraft = false
-    var dirty: Bool { note != nil && (title != baselineTitle || content != baselineContent) }
+    var busy: Bool { saving || deleting }
+    var dirty: Bool { !deleted && note != nil && (title != baselineTitle || content != baselineContent) }
 
     func load(id: String, api: APIClient, server: String) async {
-        guard !didLoad, !saving else { return }
+        guard !didLoad, !busy, !deleted else { return }
         if let loadTask { await loadTask.value; return }
         // Sharing an editor also shares its load; navigation cancellation cannot reset another screen.
         let task = Task { await fetch(id: id, api: api, server: server) }
@@ -34,7 +37,7 @@ final class NoteEditorModel: ObservableObject {
         loadTask = nil
     }
     func reload(id: String, api: APIClient, server: String) async {
-        guard !dirty, !saving, !loading else { return }
+        guard !dirty, !busy, !loading, !deleted else { return }
         didLoad = false; imageData = nil
         await load(id: id, api: api, server: server)
     }
@@ -70,7 +73,7 @@ final class NoteEditorModel: ObservableObject {
         }
     }
     func persistDraft() {
-        guard note?.isEditable == true, !loading, !draftName.isEmpty else { return }
+        guard note?.isEditable == true, !loading, !deleted, !draftName.isEmpty else { return }
         do {
             if dirty {
                 try store.save(NoteDraft(title: title, content: content, originalTitle: baselineTitle,
@@ -79,15 +82,24 @@ final class NoteEditorModel: ObservableObject {
             } else { try removeOwnedDraft() }
         } catch { draftWarning = "本机草稿保存失败，请在离开前保存到服务器：\(error.localizedDescription)" }
     }
-    func save(api: APIClient) async throws {
-        guard !saving else { return }
-        guard let note, dirty else { editing = false; return }
+    func save(api: APIClient, overwriteRemote: Bool = false) async throws {
+        guard !busy, !deleted else { return }
+        guard let note, dirty || overwriteRemote else { editing = false; return }
         let sentTitle = title
         let sentContent = content
         saving = true; defer { saving = false }
         let remote = try await api.note(note.id)
         let remoteContent = try await api.content(note.id)
-        guard remote.title == baselineTitle, remoteContent == baselineContent else { conflict = true; return }
+        guard remote.isEditable, remote.type == note.type, remote.mime == note.mime else {
+            throw UserFacingError(message: "服务端笔记类型或保护状态已改变，无法保存。请保留草稿并重新查看笔记。")
+        }
+        guard overwriteRemote || (remote.title == baselineTitle && remoteContent == baselineContent) else {
+            persistDraft(); conflict = true; return
+        }
+        // Rebase both fields so a forced save also restores fields changed only on the server.
+        baselineTitle = remote.title; baselineContent = remoteContent; baselineModified = remote.utcDateModified
+        conflict = false
+        persistDraft()
         // Rebase to exactly what each request sent; late editor events remain a local draft.
         if sentContent != baselineContent {
             try await api.updateContent(note.id, content: sentContent, mime: note.mime)
@@ -102,11 +114,24 @@ final class NoteEditorModel: ObservableObject {
         else { try removeOwnedDraft(); editing = false; draftWarning = nil }
     }
     func saveCopy(api: APIClient) async throws -> Note {
-        guard let note, !saving else { throw UserFacingError(message: "笔记尚未加载或正在保存，请稍后重试。") }
+        guard let note, !busy, !deleted else { throw UserFacingError(message: "笔记尚未加载、已删除或正在处理，请稍后重试。") }
         saving = true; defer { saving = false }
         let result = try await api.create(parentID: note.parentNoteIds.first ?? "root", title: title + "（副本）",
                                          content: content, type: note.type, mime: note.mime)
         return result
+    }
+    func delete(api: APIClient) async throws {
+        guard let note, !busy, !loading, !deleted else {
+            throw UserFacingError(message: "笔记尚未加载、已删除或正在处理，请稍后重试。")
+        }
+        deleting = true; defer { deleting = false }
+        try await api.deleteNote(note.id)
+        deleted = true; editing = false; conflict = false
+        do {
+            if !draftName.isEmpty { try store.remove(draftName) }
+            ownsDraft = false
+            draftWarning = nil
+        } catch { draftWarning = "笔记已从服务端删除，但本机草稿清理失败：\(error.localizedDescription)" }
     }
     private func removeOwnedDraft() throws {
         guard ownsDraft else { return }
@@ -144,15 +169,18 @@ private struct NoteDetailContent: View {
     @State private var preparingSave = false
     @State private var linkedNote: Note?
     @State private var discard = false
+    @State private var confirmDelete = false
     @State private var showPlainText = false
     @State private var preview = false
     @State private var showDirectory = false
     @FocusState private var titleFocused: Bool
-    private var busy: Bool { editor.saving || preparingSave }
+    private var busy: Bool { editor.busy || preparingSave }
     var body: some View {
         // Keep a real view mounted before metadata arrives so the loading task has a stable lifecycle.
         VStack(spacing: 0) {
-            if editor.loading || (editor.note == nil && editor.failure == nil) {
+            if editor.deleted {
+                ContentUnavailableView("笔记已删除", systemImage: "trash")
+            } else if editor.loading || (editor.note == nil && editor.failure == nil) {
                 ProgressView("加载笔记…").frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             else if let failure = editor.failure {
@@ -170,7 +198,7 @@ private struct NoteDetailContent: View {
                         noteContent(note)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .allowsHitTesting(!preparingSave)
+                    .allowsHitTesting(!busy)
                 }
             }
         }
@@ -181,14 +209,14 @@ private struct NoteDetailContent: View {
         .toolbar(editor.editing && !keepsAppNavigationWhileEditing ? .hidden : .visible, for: .tabBar)
         .navigationBarBackButtonHidden(editor.editing)
         .toolbar {
-            if let note = editor.note, editor.failure == nil, !editor.editing {
+            if let note = editor.note, editor.failure == nil, !editor.editing, !editor.deleted {
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     if note.isEditable {
-                        Button("编辑") { editor.editing = true }
+                        Button("编辑") { editor.editing = true }.disabled(busy)
                     }
                     Menu {
                         noteActions(note)
-                    } label: { Image(systemName: "ellipsis.circle") }.disabled(editor.saving || preparingSave)
+                    } label: { Image(systemName: "ellipsis.circle") }.disabled(busy)
                 }
             }
         }
@@ -205,6 +233,10 @@ private struct NoteDetailContent: View {
             Task { await leave() }
         }
         .onDisappear { editor.persistDraft() }
+        .onChange(of: editor.deleted) { _, deleted in
+            if deleted { dismiss() }
+        }
+        .onAppear { if editor.deleted { dismiss() } }
         .navigationDestination(item: $linkedNote) {
             NoteDetailView(noteID: $0.id, keepsAppNavigationWhileEditing: keepsAppNavigationWhileEditing)
         }
@@ -213,11 +245,18 @@ private struct NoteDetailContent: View {
             Button("继续编辑", role: .cancel) { }
         }
         .alert("服务端笔记已有修改", isPresented: $editor.conflict) {
+            Button("覆盖服务端", role: .destructive) { Task {
+                await save(overwriteRemote: true)
+            } }
             Button("保存为新副本") { Task {
                 await saveCopy()
             } }
             Button("保留本机草稿", role: .cancel) { }
-        } message: { Text("为避免覆盖其他设备的修改，当前草稿已保留。可以保存为新副本，再对照整理。") }
+        } message: { Text("可用当前标题和正文覆盖服务端原笔记，也可另存副本或继续保留本机草稿。覆盖会替换其他设备的修改。") }
+        .confirmationDialog("删除「\(editor.note?.title ?? "笔记")」？", isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("删除笔记", role: .destructive) { Task { await deleteNote() } }
+            Button("取消", role: .cancel) { }
+        } message: { Text("将从服务端删除此笔记的所有目录位置，并按服务端规则处理子笔记。本机未保存草稿也会删除。") }
     }
 
     private func editingView(_ note: Note) -> some View {
@@ -269,7 +308,7 @@ private struct NoteDetailContent: View {
                     .textSelection(.enabled).padding(20)
             }
         } else if note.type == "text", (!editing || !editor.sourceEditing), let api = try? model.client() {
-            NoteHTMLContent(content: editor.content, editing: editing && !editor.saving,
+            NoteHTMLContent(content: editor.content, editing: editing && !editor.busy,
                             api: api, bridge: webBridge, command: command,
                             onChange: { editor.content = $0; editor.persistDraft() },
                             onSourceEdit: { editor.sourceEditing = true; editor.editing = true; preview = false },
@@ -337,6 +376,11 @@ private struct NoteDetailContent: View {
             Button { model.contextNote = note; model.contextContent = editor.content; model.selectedTab = 3 } label: { Label("附加到 AI 对话", systemImage: "bubble.left.and.text.bubble.right") }
         }
         if editor.dirty { Button("放弃本机草稿", role: .destructive) { discard = true } }
+        if note.id != "root" {
+            Button(role: .destructive) { confirmDelete = true } label: {
+                Label("删除笔记", systemImage: "trash")
+            }.disabled(busy)
+        }
     }
 
     private func hideKeyboard() {
@@ -408,23 +452,33 @@ private struct NoteDetailContent: View {
         }
         hideKeyboard()
     }
-    private func save() async {
-        guard !preparingSave, !editor.saving else { return }
+    private func save(overwriteRemote: Bool = false) async {
+        guard !busy else { return }
         preparingSave = true; defer { preparingSave = false }
         do {
             // Commit input/IME and export the live DOM before disabling it or taking a snapshot.
             try await flushEditor()
-            try await editor.save(api: model.client())
+            try await editor.save(api: model.client(), overwriteRemote: overwriteRemote)
             model.changeVersion += 1
         } catch { editor.persistDraft(); model.report(error) }
     }
     private func saveCopy() async {
-        guard !preparingSave, !editor.saving else { return }
+        guard !busy else { return }
         preparingSave = true; defer { preparingSave = false }
         do {
             try await flushEditor()
             linkedNote = try await editor.saveCopy(api: model.client())
             model.changeVersion += 1
+        } catch { editor.persistDraft(); model.report(error) }
+    }
+    private func deleteNote() async {
+        guard !busy else { return }
+        preparingSave = true; defer { preparingSave = false }
+        hideKeyboard()
+        do {
+            try await editor.delete(api: model.client())
+            model.didDeleteNote(noteID)
+            if let warning = editor.draftWarning { model.report(UserFacingError(message: warning)) }
         } catch { editor.persistDraft(); model.report(error) }
     }
 }

@@ -10,6 +10,7 @@
 | 正文 | `GET /etapi/notes/{id}/content` 返回原始数据，不是 JSON。 |
 | 保存正文 | `PUT /etapi/notes/{id}/content` 发送 UTF-8 原始字符串，传输 MIME 必须为 `text/plain; charset=utf-8`，即使笔记 MIME 为 `text/html`。成功返回 204。 |
 | 保存标题 | `PATCH /etapi/notes/{id}` 只发送 `{title}`；不能回传只读字段。 |
+| 删除笔记 | `DELETE /etapi/notes/{id}`，成功返回 204；删除整个笔记，而非单个 branch 位置。客户端不允许删除 `root`。 |
 | 新建 | `POST /etapi/create-note` 发送 `parentNoteId,title,type,mime,content`，读取 `{note,branch}`；不强制 ID。 |
 | 今天 | `GET /etapi/calendar/days/yyyy-MM-dd` 获取或创建日期笔记，并遵循服务端模板。仅在用户主动操作时调用。使用本地时区、Gregorian 日历和小写 `yyyy`。 |
 | 搜索 | `GET /etapi/notes?search=...&ancestorNoteId=root&fastSearch=false&limit=100`；结果 `{results:[Note]}`。目录选择时替换 `ancestorNoteId`。使用 URLQueryItem 并额外编码 `+`，避免 Express 将字面加号解释为空格。 |
@@ -18,7 +19,7 @@
 
 搜索未提供 offset、cursor、total 或 snippet，不宣称实现无限分页。没有使用实现存在歧义的 `orderDirection` 参数。
 
-ETAPI 更新没有 `If-Match` 或原子条件保存。客户端先比较正文与标题，只能发现检查之前的修改；检查与写入之间仍存在竞态。标题和正文部分成功时，分别更新本地保存基线并保留剩余草稿。
+ETAPI 更新没有 `If-Match` 或原子条件保存。客户端先比较正文与标题，只能发现检查之前的修改；检查与写入之间仍存在竞态。冲突时可明确选择「覆盖服务端」，以当前本机标题和正文更新同一笔记，包括仅在服务端发生变化的字段。标题和正文部分成功时，分别更新本地保存基线并保留剩余草稿，允许重试尚未成功的字段。
 
 ## AI 服务
 

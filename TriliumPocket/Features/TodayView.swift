@@ -65,6 +65,9 @@ struct TodayView: View {
         .onChange(of: draft) { _, value in
             do { try LocalStore().save(value, name: draftName) } catch { model.report(error) }
         }
+        .onChange(of: model.changeVersion) { _, _ in
+            if let lastCapture, model.isNoteDeleted(lastCapture.id) { self.lastCapture = nil }
+        }
     }
     private var draftName: String { LocalStore.scopedName("capture", server: model.configuration.address) }
     private func openToday() async {

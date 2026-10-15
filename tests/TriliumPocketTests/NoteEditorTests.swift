@@ -105,6 +105,181 @@ final class NoteEditorTests: XCTestCase {
         XCTAssertTrue(editor.dirty)
         XCTAssertEqual(editor.content, "<p>My local work</p>")
         XCTAssertFalse(requests.contains { ["PUT", "PATCH", "POST"].contains($0.httpMethod ?? "") })
+        let name = LocalStore.scopedName("note", server: api.baseURL.absoluteString, noteID: "sharedNote")
+        XCTAssertEqual(LocalStore().load(name, as: NoteDraft.self)?.content, "<p>My local work</p>")
+    }
+
+    @MainActor
+    func testOverwriteUpdatesOriginalNoteIncludingTitleChangedOnlyOnServer() async throws {
+        let fixture = EditorServer()
+        let api = try await makeClient { try await fixture.respond(to: $0) }
+        let editor = NoteEditorModel()
+        defer { cleanup(editor, api: api) }
+        await editor.load(id: "sharedNote", api: api, server: api.baseURL.absoluteString)
+        editor.editing = true
+        editor.content = "<p>My local work</p>"
+        await fixture.changeRemoteContent("<p>Changed on desktop</p>")
+        await fixture.changeRemoteTitle("Desktop title")
+        try await editor.save(api: api)
+        XCTAssertTrue(editor.conflict)
+
+        try await editor.save(api: api, overwriteRemote: true)
+
+        let requests = await fixture.requests
+        let put = try XCTUnwrap(requests.first { $0.httpMethod == "PUT" })
+        let patch = try XCTUnwrap(requests.first { $0.httpMethod == "PATCH" })
+        XCTAssertEqual(put.url?.path, "/trilium/etapi/notes/sharedNote/content")
+        XCTAssertEqual(String(data: try requestBody(put), encoding: .utf8), "<p>My local work</p>")
+        XCTAssertEqual(patch.url?.path, "/trilium/etapi/notes/sharedNote")
+        let body = try JSONDecoder().decode([String: String].self, from: requestBody(patch))
+        XCTAssertEqual(body, ["title": "Research"])
+        XCTAssertFalse(requests.contains { $0.httpMethod == "POST" })
+        XCTAssertFalse(editor.conflict)
+        XCTAssertFalse(editor.dirty)
+        XCTAssertFalse(editor.editing)
+        let name = LocalStore.scopedName("note", server: api.baseURL.absoluteString, noteID: "sharedNote")
+        XCTAssertNil(LocalStore().load(name, as: NoteDraft.self))
+    }
+
+    @MainActor
+    func testOverwriteRestoresBodyChangedOnlyOnServer() async throws {
+        let fixture = EditorServer()
+        let api = try await makeClient { try await fixture.respond(to: $0) }
+        let editor = NoteEditorModel()
+        defer { cleanup(editor, api: api) }
+        await editor.load(id: "sharedNote", api: api, server: api.baseURL.absoluteString)
+        editor.title = "My local title"
+        await fixture.changeRemoteContent("<p>Desktop body</p>")
+
+        try await editor.save(api: api, overwriteRemote: true)
+
+        let requests = await fixture.requests
+        let put = try XCTUnwrap(requests.first { $0.httpMethod == "PUT" })
+        XCTAssertEqual(String(data: try requestBody(put), encoding: .utf8), "<p>Original body</p>")
+        let remote = try await api.note("sharedNote")
+        XCTAssertEqual(remote.title, "My local title")
+        XCTAssertFalse(editor.dirty)
+    }
+
+    @MainActor
+    func testPartiallyFailedOverwriteCanRetryWithoutRewritingSavedBody() async throws {
+        let fixture = EditorServer()
+        let api = try await makeClient { try await fixture.respond(to: $0) }
+        let editor = NoteEditorModel()
+        defer { cleanup(editor, api: api) }
+        await editor.load(id: "sharedNote", api: api, server: api.baseURL.absoluteString)
+        editor.editing = true
+        editor.title = "My local title"
+        editor.content = "<p>My local body</p>"
+        await fixture.changeRemoteTitle("Desktop title")
+        await fixture.changeRemoteContent("<p>Desktop body</p>")
+        await fixture.failNextTitleUpdate()
+
+        do {
+            try await editor.save(api: api, overwriteRemote: true)
+            XCTFail("The title update must fail.")
+        } catch {
+            XCTAssertTrue(editor.dirty)
+            XCTAssertTrue(editor.editing)
+            XCTAssertFalse(editor.saving)
+        }
+        let name = LocalStore.scopedName("note", server: api.baseURL.absoluteString, noteID: "sharedNote")
+        let draft = try XCTUnwrap(LocalStore().load(name, as: NoteDraft.self))
+        XCTAssertEqual(draft.originalTitle, "Desktop title")
+        XCTAssertEqual(draft.originalContent, "<p>My local body</p>")
+        XCTAssertEqual(draft.title, "My local title")
+
+        try await editor.save(api: api)
+
+        let requests = await fixture.requests
+        XCTAssertEqual(requests.filter { $0.httpMethod == "PUT" }.count, 1)
+        XCTAssertEqual(requests.filter { $0.httpMethod == "PATCH" }.count, 2)
+        XCTAssertFalse(editor.conflict)
+        XCTAssertFalse(editor.dirty)
+        XCTAssertFalse(editor.editing)
+        XCTAssertNil(LocalStore().load(name, as: NoteDraft.self))
+    }
+
+    @MainActor
+    func testDeleteRemovesServerNoteAndDraftAndPreventsStaleEditorWrites() async throws {
+        let fixture = EditorServer()
+        let api = try await makeClient { try await fixture.respond(to: $0) }
+        let model = AppModel(client: api)
+        let editor = model.editor(for: "sharedNote")
+        defer { cleanup(editor, api: api) }
+        await editor.load(id: "sharedNote", api: api, server: api.baseURL.absoluteString)
+        model.contextNote = editor.note
+        model.contextContent = editor.content
+        editor.editing = true
+        editor.content = "<p>Unsaved body</p>"
+        editor.persistDraft()
+        let name = LocalStore.scopedName("note", server: api.baseURL.absoluteString, noteID: "sharedNote")
+        XCTAssertNotNil(LocalStore().load(name, as: NoteDraft.self))
+
+        try await editor.delete(api: api)
+        model.didDeleteNote("sharedNote")
+        editor.content = "<p>Late WebKit edit</p>"
+        editor.persistDraft()
+        try await editor.save(api: api)
+        await editor.load(id: "sharedNote", api: api, server: api.baseURL.absoluteString)
+        await editor.reload(id: "sharedNote", api: api, server: api.baseURL.absoluteString)
+
+        let requests = await fixture.requests
+        XCTAssertEqual(requests.count, 3)
+        XCTAssertEqual(requests.last?.httpMethod, "DELETE")
+        XCTAssertEqual(requests.last?.url?.path, "/trilium/etapi/notes/sharedNote")
+        XCTAssertEqual(requests.last?.value(forHTTPHeaderField: "Authorization"), "test-token")
+        XCTAssertTrue(editor.deleted)
+        XCTAssertFalse(editor.deleting)
+        XCTAssertFalse(editor.dirty)
+        XCTAssertFalse(editor.editing)
+        XCTAssertNil(LocalStore().load(name, as: NoteDraft.self))
+        XCTAssertTrue(editor === model.editor(for: "sharedNote"))
+        XCTAssertTrue(model.isNoteDeleted("sharedNote"))
+        XCTAssertFalse(model.isNoteDeleted("otherNote"))
+        XCTAssertNil(model.contextNote)
+        XCTAssertNil(model.contextContent)
+        XCTAssertEqual(model.changeVersion, 1)
+    }
+
+    @MainActor
+    func testFailedDeletePreservesEditorAndDraft() async throws {
+        let fixture = EditorServer(deleteStatus: 403)
+        let api = try await makeClient { try await fixture.respond(to: $0) }
+        let editor = NoteEditorModel()
+        defer { cleanup(editor, api: api) }
+        await editor.load(id: "sharedNote", api: api, server: api.baseURL.absoluteString)
+        editor.editing = true
+        editor.content = "<p>Unsaved body</p>"
+        editor.persistDraft()
+
+        do {
+            try await editor.delete(api: api)
+            XCTFail("The server must reject deletion.")
+        } catch {
+            XCTAssertFalse(editor.deleted)
+            XCTAssertFalse(editor.deleting)
+            XCTAssertTrue(editor.editing)
+            XCTAssertTrue(editor.dirty)
+        }
+        let name = LocalStore.scopedName("note", server: api.baseURL.absoluteString, noteID: "sharedNote")
+        XCTAssertEqual(LocalStore().load(name, as: NoteDraft.self)?.content, "<p>Unsaved body</p>")
+    }
+
+    func testRootCannotBeDeleted() async throws {
+        let fixture = EditorServer()
+        let api = try await makeClient { try await fixture.respond(to: $0) }
+        defer {
+            api.session.invalidateAndCancel()
+            if let host = api.baseURL.host { Task { await EditorURLProtocol.registry.remove(host: host) } }
+        }
+        do {
+            try await api.deleteNote("root")
+            XCTFail("Root deletion must be rejected locally.")
+        } catch {
+            let requests = await fixture.requests
+            XCTAssertTrue(requests.isEmpty)
+        }
     }
 
     @MainActor
@@ -200,41 +375,58 @@ final class NoteEditorTests: XCTestCase {
         api.session.invalidateAndCancel()
         if let host = api.baseURL.host { Task { await EditorURLProtocol.registry.remove(host: host) } }
     }
+}
 
-    private func requestBody(_ request: URLRequest) throws -> Data {
-        if let body = request.httpBody { return body }
-        let stream = try XCTUnwrap(request.httpBodyStream)
-        stream.open()
-        defer { stream.close() }
-        var result = Data()
-        var bytes = [UInt8](repeating: 0, count: 4096)
-        while true {
-            let count = stream.read(&bytes, maxLength: bytes.count)
-            if count == 0 { return result }
-            if count < 0 { throw stream.streamError ?? URLError(.cannotDecodeRawData) }
-            result.append(contentsOf: bytes.prefix(count))
-        }
+private func requestBody(_ request: URLRequest) throws -> Data {
+    if let body = request.httpBody { return body }
+    let stream = try XCTUnwrap(request.httpBodyStream)
+    stream.open()
+    defer { stream.close() }
+    var result = Data()
+    var bytes = [UInt8](repeating: 0, count: 4096)
+    while true {
+        let count = stream.read(&bytes, maxLength: bytes.count)
+        if count == 0 { return result }
+        if count < 0 { throw stream.streamError ?? URLError(.cannotDecodeRawData) }
+        result.append(contentsOf: bytes.prefix(count))
     }
 }
 
 private actor EditorServer {
     private(set) var requests: [URLRequest] = []
     private var content = "<p>Original body</p>"
-    private let metadata = Data("""
-    {"noteId":"sharedNote","title":"Research","type":"text","mime":"text/html",
+    private var title = "Research"
+    private var shouldFailTitleUpdate = false
+    private let deleteStatus: Int
+    private var metadata: Data { Data("""
+    {"noteId":"sharedNote","title":"\(title)","type":"text","mime":"text/html",
      "isProtected":false,"parentNoteIds":["root"],"childNoteIds":[],"childBranchIds":[],
      "utcDateModified":"2026-09-28 12:00:00.000Z"}
-    """.utf8)
+    """.utf8) }
 
+    init(deleteStatus: Int = 204) { self.deleteStatus = deleteStatus }
     func changeRemoteContent(_ value: String) { content = value }
+    func changeRemoteTitle(_ value: String) { title = value }
+    func failNextTitleUpdate() { shouldFailTitleUpdate = true }
 
-    func respond(to request: URLRequest) throws -> (Int, Data) {
+    func respond(to incomingRequest: URLRequest) throws -> (Int, Data) {
+        var request = incomingRequest
+        if request.httpBody != nil || request.httpBodyStream != nil {
+            request.httpBody = try requestBody(request)
+        }
         requests.append(request)
         switch (request.httpMethod, request.url?.path) {
         case ("GET", "/trilium/etapi/notes/sharedNote"): return (200, metadata)
         case ("GET", "/trilium/etapi/notes/sharedNote/content"): return (200, Data(content.utf8))
-        case ("PATCH", "/trilium/etapi/notes/sharedNote"): return (200, metadata)
-        case ("PUT", "/trilium/etapi/notes/sharedNote/content"): return (204, Data())
+        case ("PATCH", "/trilium/etapi/notes/sharedNote"):
+            if shouldFailTitleUpdate { shouldFailTitleUpdate = false; return (500, Data()) }
+            let fields = try JSONDecoder().decode([String: String].self, from: requestBody(request))
+            title = fields["title"] ?? title
+            return (200, metadata)
+        case ("PUT", "/trilium/etapi/notes/sharedNote/content"):
+            content = String(data: try requestBody(request), encoding: .utf8) ?? ""
+            return (204, Data())
+        case ("DELETE", "/trilium/etapi/notes/sharedNote"): return (deleteStatus, Data())
         default: throw URLError(.unsupportedURL)
         }
     }

@@ -261,7 +261,7 @@ struct NoteWebView: UIViewRepresentable {
     #note figure.table{display:block!important;width:100%!important;max-width:100%!important;margin:16px 0!important;box-sizing:border-box}
     #note table{display:table!important;width:100%!important;max-width:100%!important;margin-inline:0!important;border-collapse:collapse;table-layout:auto!important}
     #note col,#note th,#note td{width:auto!important}
-    #note td,#note th{border:1px solid #8885;padding:8px;overflow-wrap:anywhere;white-space:normal!important;vertical-align:top}
+    #note td,#note th{border:1px solid #8885;padding:8px;overflow-wrap:anywhere;white-space:normal!important;vertical-align:top;text-align:left}
     #note ul,#note ol{padding-inline-start:2em;list-style-position:outside}
     #note li ul,#note li ol{margin-block:0}
     code{font-family:ui-monospace,monospace;background:#8881;border-radius:4px;padding:2px 4px}pre code{background:none;padding:0}

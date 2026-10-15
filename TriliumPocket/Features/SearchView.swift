@@ -37,7 +37,10 @@ struct SearchView: View {
         }
         .navigationTitle("搜索")
         .searchable(text: $query, prompt: "标题、正文或 #标签")
-        .task(id: "\(query)|\(scope?.id ?? "root")|\(revision)") { await search() }
+        .task(id: "\(query)|\(scope?.id ?? "root")|\(revision)|\(model.changeVersion)") { await search() }
+        .onChange(of: model.changeVersion) { _, _ in
+            if let scope, model.isNoteDeleted(scope.id) { self.scope = nil }
+        }
         .sheet(isPresented: $picking) {
             NavigationStack {
                 NotebookView(noteID: "root", title: "选择搜索目录", picking: { scope = $0; picking = false; revision += 1 })

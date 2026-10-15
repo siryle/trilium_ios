@@ -2,6 +2,7 @@ import SwiftUI
 
 struct NotebookView: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.dismiss) private var dismiss
     let noteID: String
     let title: String
     var picking: ((Note) -> Void)? = nil
@@ -90,6 +91,7 @@ struct NotebookView: View {
     }
     private func load() async {
         guard model.isConfigured else { return }
+        if model.isNoteDeleted(noteID) { dismiss(); return }
         loading = true; failure = nil
         defer { loading = false }
         do {
